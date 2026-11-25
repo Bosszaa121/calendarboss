@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Prompt", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    color-scheme: dark;
+    background-color: #090c11;
+    color: #e6edf3;
+    letter-spacing: 0.01em;
+  }
+
+  body {
+    overflow-x: hidden;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Custom subtle dark scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #090c11;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #242e3d;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #364559;
+}
+
+/* Luminous highlight for portfolio-matched asset tags */
+.ticker-glow {
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.35), inset 0 0 0 1px rgba(251, 191, 36, 0.55);
+}
+
