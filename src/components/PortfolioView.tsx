@@ -2,15 +2,20 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BellRing,
   Calendar,
+  Download,
+  Loader2,
   Newspaper,
   Plus,
-  RotateCcw,
   Search,
+  Sparkles,
   Trash2,
+  Upload,
+  UserCheck,
 } from 'lucide-react';
 import {
   ASSET_CATALOG,
   CATEGORY_LABELS_TH,
+  POPULAR_STARTER_TICKERS,
 } from '../data/assetCatalog';
 import {
   AssetCategory,
@@ -29,38 +34,57 @@ interface PortfolioViewProps {
   portfolio: PortfolioAsset[];
   calendarEvents: CalendarEvent[];
   newsItems: NewsItem[];
-  onAddAsset: (asset: Omit<PortfolioAsset, 'id' | 'addedAt'>) => void;
-  onRemoveAsset: (id: string) => void;
-  onResetDefault: () => void;
+  isSignedInLocal: boolean;
+  accountLabel: string;
+  onAddAsset: (asset: Omit<PortfolioAsset, 'id' | 'addedAt'>) => Promise<void> | void;
+  onRemoveAsset: (id: string) => Promise<void> | void;
+  onExportJson: () => void;
+  onImportJsonFile: (file: File) => void;
+  onOpenAuth: () => void;
   onNavigate: (tab: NavTab, options?: { onlyPortfolio?: boolean; searchQuery?: string }) => void;
 }
 
-const QUICK_POPULAR_SYMBOLS = ['VOO', 'SPY', 'QQQ', 'SCHD', 'VTI', 'NVDA', 'AAPL', 'PTT.BK', 'BTC', 'USD/THB'];
+const FILTER_CATEGORIES: Array<'ALL' | AssetCategory> = [
+  'ALL',
+  'US ETF',
+  'Thai Stock',
+  'US Stock',
+  'Crypto',
+  'Commodity',
+  'Forex',
+];
 
 export function PortfolioView({
   portfolio,
   calendarEvents,
   newsItems,
+  isSignedInLocal,
+  accountLabel,
   onAddAsset,
   onRemoveAsset,
-  onResetDefault,
+  onExportJson,
+  onImportJsonFile,
+  onOpenAuth,
   onNavigate,
 }: PortfolioViewProps) {
   const [query, setQuery] = useState('');
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [highlightIndex, setHighlightIndex] = useState(0);
-  const [customCategory, setCustomCategory] = useState<AssetCategory>('Stock');
+  const [customCategory, setCustomCategory] = useState<AssetCategory>('US ETF');
   const [activeCategoryFilter, setActiveCategoryFilter] = useState<'ALL' | AssetCategory>('ALL');
-  const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
+  const [classifyingTicker, setClassifyingTicker] = useState<string | null>(null);
+  const [feedbackMsg, setFeedbackMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(
+    null
+  );
 
   const searchContainerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const heldSymbolSet = useMemo(
-    () => new Set(portfolio.map((p) => p.symbol.toUpperCase())),
+    () => new Set(portfolio.map((p) => p.symbol.toUpperCase().replace(/\.BK$/, ''))),
     [portfolio]
   );
 
-  // Close autocomplete dropdown on outside click
   useEffect(() => {
     function handleOutsideClick(e: MouseEvent) {
       if (
@@ -77,92 +101,156 @@ export function PortfolioView({
   const suggestions = useMemo(() => {
     const trimmed = query.trim().toLowerCase();
     if (!trimmed) {
-      // Show curated popular assets immediately when user clicks input
-      return ASSET_CATALOG.slice(0, 14);
+      return ASSET_CATALOG.slice(0, 18);
     }
     return ASSET_CATALOG.filter((item) => {
       const inSymbol = item.symbol.toLowerCase().includes(trimmed);
       const inName = item.name.toLowerCase().includes(trimmed);
       const inCategory = item.category.toLowerCase().includes(trimmed);
+      const inSector = item.sector.toLowerCase().includes(trimmed);
       const inMarket = item.market.toLowerCase().includes(trimmed);
       const inAliases = item.aliases?.some((a) => a.toLowerCase().includes(trimmed));
-      return inSymbol || inName || inCategory || inMarket || Boolean(inAliases);
-    }).slice(0, 12);
+      return inSymbol || inName || inCategory || inSector || inMarket || Boolean(inAliases);
+    }).slice(0, 14);
   }, [query]);
 
-  const normalizedQueryTicker = query.trim().toUpperCase();
+  const normalizedQueryTicker = query
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9./-]/g, '');
+
   const exactCatalogMatch = useMemo(
-    () => ASSET_CATALOG.find((a) => a.symbol.toUpperCase() === normalizedQueryTicker),
+    () =>
+      ASSET_CATALOG.find(
+        (a) =>
+          a.symbol.toUpperCase() === normalizedQueryTicker ||
+          a.aliases?.some((al) => al.toUpperCase() === normalizedQueryTicker)
+      ),
     [normalizedQueryTicker]
   );
+
+  const isAlreadyHeld = (sym: string) =>
+    heldSymbolSet.has(sym.toUpperCase().replace(/\.BK$/, ''));
 
   const showCustomAddRow =
     normalizedQueryTicker.length >= 1 &&
     !exactCatalogMatch &&
-    !heldSymbolSet.has(normalizedQueryTicker);
+    !isAlreadyHeld(normalizedQueryTicker);
 
-  function triggerFeedback(msg: string) {
-    setFeedbackMsg(msg);
+  function triggerFeedback(type: 'success' | 'error', text: string) {
+    setFeedbackMsg({ type, text });
     window.setTimeout(() => {
-      setFeedbackMsg((prev) => (prev === msg ? null : prev));
-    }, 3000);
+      setFeedbackMsg((prev) => (prev?.text === text ? null : prev));
+    }, 4000);
   }
 
-  function handleSelectCatalogItem(item: CatalogAsset) {
-    if (heldSymbolSet.has(item.symbol.toUpperCase())) {
-      triggerFeedback(`${item.symbol} อยู่ในพอร์ตโฟลิโอของคุณแล้ว`);
+  async function handleSelectCatalogItem(item: CatalogAsset) {
+    if (isAlreadyHeld(item.symbol)) {
+      triggerFeedback('error', `${item.symbol} อยู่ในพอร์ตโฟลิโอของคุณแล้ว`);
       setDropdownOpen(false);
       return;
     }
-    onAddAsset({
-      symbol: item.symbol,
-      name: item.name,
-      category: item.category,
-      market: item.market,
-      flag: item.flag,
-      currency: item.currency,
-    });
-    setQuery('');
-    setDropdownOpen(false);
-    triggerFeedback(`เพิ่ม ${item.symbol} เข้าพอร์ตเรียบร้อย ระบบจับคู่ข่าวและปฏิทินอัปเดตทันที`);
+    try {
+      await onAddAsset({
+        symbol: item.symbol,
+        name: item.name,
+        category: item.category,
+        market: item.market,
+        flag: item.flag,
+        currency: item.currency,
+        sector: item.sector,
+        themes: item.themes,
+        topHoldings: item.topHoldings,
+        hasDividends: item.hasDividends,
+        hasEarnings: item.hasEarnings,
+      });
+      setQuery('');
+      setDropdownOpen(false);
+      triggerFeedback(
+        'success',
+        `เพิ่ม ${item.symbol} (${item.category}) เข้าพอร์ตแล้ว — ระบบคำนวณผลกระทบ งบ และวัน XD ทันที`
+      );
+    } catch (err) {
+      triggerFeedback(
+        'error',
+        err instanceof Error ? err.message : 'ไม่สามารถบันทึกสินทรัพย์ได้'
+      );
+    }
   }
 
-  function handleAddCustomTicker() {
+  async function handleAddCustomTickerWithAI() {
     if (!normalizedQueryTicker) return;
-    if (heldSymbolSet.has(normalizedQueryTicker)) {
-      triggerFeedback(`${normalizedQueryTicker} อยู่ในพอร์ตโฟลิโอของคุณแล้ว`);
+    if (isAlreadyHeld(normalizedQueryTicker)) {
+      triggerFeedback('error', `${normalizedQueryTicker} อยู่ในพอร์ตโฟลิโอของคุณแล้ว`);
       return;
     }
 
-    const isThai = normalizedQueryTicker.endsWith('.BK');
-    const flag =
-      customCategory === 'Crypto'
-        ? '🌐'
-        : isThai || normalizedQueryTicker.includes('THB')
-        ? '🇹🇭'
-        : customCategory === 'Forex'
-        ? '💱'
-        : '🇺🇸';
-    const market =
-      customCategory === 'Crypto'
-        ? 'Crypto'
-        : customCategory === 'Forex'
-        ? 'FX'
-        : isThai
-        ? 'SET'
-        : 'Global';
-
-    onAddAsset({
-      symbol: normalizedQueryTicker,
-      name: `${normalizedQueryTicker} (${CATEGORY_LABELS_TH[customCategory]})`,
-      category: customCategory,
-      market,
-      flag,
-      currency: isThai ? 'THB' : 'USD',
-    });
-    setQuery('');
+    setClassifyingTicker(normalizedQueryTicker);
     setDropdownOpen(false);
-    triggerFeedback(`เพิ่ม ${normalizedQueryTicker} เข้าพอร์ตเรียบร้อยแล้ว`);
+
+    try {
+      const res = await fetch('/api/classify-asset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: normalizedQueryTicker }),
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
+        const classified = await res.json();
+        await onAddAsset({
+          symbol: classified.symbol || normalizedQueryTicker,
+          name: classified.name || normalizedQueryTicker,
+          category: classified.category || customCategory,
+          market: classified.market || 'Global',
+          flag: classified.flag || '🌐',
+          currency: classified.currency || 'USD',
+          sector: classified.sector || 'ทั่วไป (General)',
+          themes: Array.isArray(classified.themes) ? classified.themes : [],
+          topHoldings: Array.isArray(classified.topHoldings) ? classified.topHoldings : undefined,
+          hasDividends:
+            typeof classified.hasDividends === 'boolean' ? classified.hasDividends : undefined,
+          hasEarnings:
+            typeof classified.hasEarnings === 'boolean' ? classified.hasEarnings : undefined,
+        });
+        setQuery('');
+        triggerFeedback(
+          'success',
+          `AI ระบุข้อมูล ${classified.symbol}: ${classified.name} (${classified.category} · ${classified.sector}) และเพิ่มเข้าพอร์ตเรียบร้อย`
+        );
+        return;
+      }
+
+      // Graceful fallback if static deployment without backend API
+      const isThai =
+        customCategory === 'Thai Stock' || normalizedQueryTicker.endsWith('.BK');
+      const cleanSymbol = isThai
+        ? normalizedQueryTicker.replace(/\.BK$/, '')
+        : normalizedQueryTicker;
+      await onAddAsset({
+        symbol: cleanSymbol,
+        name: `${cleanSymbol} (${CATEGORY_LABELS_TH[customCategory]})`,
+        category: customCategory,
+        market: isThai ? 'SET' : customCategory === 'Crypto' ? 'Crypto' : 'Global',
+        flag: isThai
+          ? '🇹🇭'
+          : customCategory === 'US ETF' || customCategory === 'US Stock'
+          ? '🇺🇸'
+          : '🌐',
+        currency: isThai ? 'THB' : 'USD',
+        sector: CATEGORY_LABELS_TH[customCategory],
+        themes: isThai ? ['thai_equity'] : ['us_equity', 'us_rates_sensitive'],
+      });
+      setQuery('');
+      triggerFeedback('success', `เพิ่ม ${cleanSymbol} เข้าพอร์ตเรียบร้อยแล้ว`);
+    } catch (err) {
+      triggerFeedback(
+        'error',
+        err instanceof Error ? err.message : 'ไม่สามารถเพิ่มสินทรัพย์ได้ในขณะนี้'
+      );
+    } finally {
+      setClassifyingTicker(null);
+    }
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -182,13 +270,18 @@ export function PortfolioView({
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (highlightIndex < suggestions.length && suggestions[highlightIndex]) {
-        handleSelectCatalogItem(suggestions[highlightIndex]);
+        void handleSelectCatalogItem(suggestions[highlightIndex]);
       } else if (showCustomAddRow) {
-        handleAddCustomTicker();
+        void handleAddCustomTickerWithAI();
       }
     } else if (e.key === 'Escape') {
       setDropdownOpen(false);
     }
+  }
+
+  function focusSearchInput() {
+    inputRef.current?.focus();
+    setDropdownOpen(true);
   }
 
   const filteredPortfolio = useMemo(() => {
@@ -200,23 +293,55 @@ export function PortfolioView({
     <div className="space-y-6">
       {/* Add Asset Search Section */}
       <section className="bg-[#10151E] border border-[#1E2634] rounded-xl p-5">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
           <div>
-            <h2 className="text-base font-semibold text-slate-100">
-              เพิ่มสินทรัพย์เข้าพอร์ตโฟลิโอ
-            </h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-semibold text-slate-100">
+                เพิ่มสินทรัพย์เข้าพอร์ตโฟลิโอ
+              </h2>
+              <span className="text-xs text-slate-400">
+                · บัญชี: <span className="text-slate-200 font-medium">{accountLabel}</span>
+              </span>
+              {isSignedInLocal && (
+                <span className="inline-flex items-center gap-1 text-[11px] text-emerald-400">
+                  <UserCheck className="w-3.5 h-3.5" />
+                  บัญชีส่วนตัวในเครื่อง
+                </span>
+              )}
+            </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              รองรับหุ้นไทย (.BK), หุ้นสหรัฐฯ, กองทุน ETF (VOO, SPY, QQQ, SCHD, VTI), คริปโต และค่าเงิน · บันทึกอัตโนมัติในเบราว์เซอร์
+              ค้นหา US ETF (QQQM, SMH, BLOK, GLD, SLV, VOO, SCHD, SGOV, JPST, IBIT), หุ้นไทย (KCG, PTT, CPALL, DELTA), หุ้นสหรัฐฯ, คริปโต หรือพิมพ์ Ticker อิสระเพื่อให้ AI ระบุข้อมูลอัตโนมัติ
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onResetDefault}
-            className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200 transition-colors self-start sm:self-auto whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>รีเซ็ตพอร์ตตัวอย่าง</span>
-          </button>
+
+          {/* Export / Import JSON Actions */}
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onExportJson}
+              disabled={portfolio.length === 0}
+              className="px-3 py-1.5 rounded-lg bg-[#161E2B] border border-[#253042] hover:border-amber-500/50 disabled:opacity-45 disabled:cursor-not-allowed text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5 text-amber-400" />
+              <span>Export JSON</span>
+            </button>
+            <label className="px-3 py-1.5 rounded-lg bg-[#161E2B] border border-[#253042] hover:border-sky-500/50 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer">
+              <Upload className="w-3.5 h-3.5 text-sky-400" />
+              <span>Import JSON</span>
+              <input
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    onImportJsonFile(file);
+                    e.target.value = '';
+                  }
+                }}
+              />
+            </label>
+          </div>
         </div>
 
         <div ref={searchContainerRef} className="relative">
@@ -224,8 +349,10 @@ export function PortfolioView({
             <div className="relative flex-1">
               <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
+                ref={inputRef}
                 type="text"
                 value={query}
+                disabled={Boolean(classifyingTicker)}
                 onFocus={() => {
                   setDropdownOpen(true);
                   setHighlightIndex(0);
@@ -236,7 +363,7 @@ export function PortfolioView({
                   setHighlightIndex(0);
                 }}
                 onKeyDown={handleKeyDown}
-                placeholder="คลิกหรือพิมพ์ชื่อย่อสินทรัพย์ เช่น VOO, NVDA, PTT.BK, SCHD, BTC, USD/THB..."
+                placeholder="พิมพ์ชื่อย่อหรือชื่อบริษัท เช่น QQQM, SMH, BLOK, GLD, SLV, KCG, PTT, NVDA, BTC..."
                 className="w-full bg-[#090C11] border border-[#253042] rounded-lg pl-10 pr-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/70 focus:ring-2 focus:ring-amber-500/20 transition-all"
                 aria-label="ค้นหาและเพิ่มสินทรัพย์"
               />
@@ -246,30 +373,42 @@ export function PortfolioView({
               <select
                 value={customCategory}
                 onChange={(e) => setCustomCategory(e.target.value as AssetCategory)}
-                aria-label="ประเภทสินทรัพย์กรณีพิมพ์เอง"
+                aria-label="ประเภทสำรองกรณีไม่เชื่อมต่อ AI"
                 className="bg-[#090C11] border border-[#253042] rounded-lg px-3 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500/70 cursor-pointer"
               >
-                <option value="Stock">ประเภท: หุ้น (Stock)</option>
-                <option value="ETF">ประเภท: กองทุน ETF</option>
-                <option value="Crypto">ประเภท: คริปโต</option>
-                <option value="Forex">ประเภท: ค่าเงิน (Forex)</option>
+                <option value="US ETF">US ETF</option>
+                <option value="Thai Stock">หุ้นไทย (SET/mai)</option>
+                <option value="US Stock">หุ้นสหรัฐฯ</option>
+                <option value="Crypto">คริปโต</option>
+                <option value="Commodity">โภคภัณฑ์</option>
+                <option value="Forex">ค่าเงิน (FX)</option>
               </select>
 
               <button
                 type="button"
+                disabled={Boolean(classifyingTicker)}
                 onClick={() => {
                   if (exactCatalogMatch) {
-                    handleSelectCatalogItem(exactCatalogMatch);
+                    void handleSelectCatalogItem(exactCatalogMatch);
                   } else if (normalizedQueryTicker) {
-                    handleAddCustomTicker();
+                    void handleAddCustomTickerWithAI();
                   } else {
-                    setDropdownOpen(true);
+                    focusSearchInput();
                   }
                 }}
-                className="px-4 py-2.5 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                className="px-4 py-2.5 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 disabled:opacity-70 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
               >
-                <Plus className="w-4 h-4" />
-                <span>เพิ่มสินทรัพย์</span>
+                {classifyingTicker ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>AI กำลังระบุข้อมูล...</span>
+                  </>
+                ) : (
+                  <>
+                    <Plus className="w-4 h-4" />
+                    <span>เพิ่มสินทรัพย์</span>
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -281,20 +420,20 @@ export function PortfolioView({
                 <span>
                   {query.trim()
                     ? `ผลการค้นหา "${query.trim()}"`
-                    : 'สินทรัพย์ยอดนิยมทั่วโลก — คลิกเพื่อเพิ่มทันที'}
+                    : 'US ETF ยอดนิยม, หุ้นไทย SET/mai, หุ้นสหรัฐฯ และโภคภัณฑ์'}
                 </span>
-                <span>กด Enter เพื่อเลือก</span>
+                <span>กด Enter เพื่อเพิ่ม</span>
               </div>
 
               {suggestions.map((item, idx) => {
-                const alreadyHeld = heldSymbolSet.has(item.symbol.toUpperCase());
+                const alreadyHeld = isAlreadyHeld(item.symbol);
                 const isHighlighted = idx === highlightIndex;
                 return (
                   <button
                     key={item.symbol}
                     type="button"
                     onMouseEnter={() => setHighlightIndex(idx)}
-                    onClick={() => handleSelectCatalogItem(item)}
+                    onClick={() => void handleSelectCatalogItem(item)}
                     className={`w-full px-3.5 py-2.5 flex items-center justify-between gap-3 text-left transition-colors cursor-pointer border-b border-[#1A2230]/60 last:border-b-0 ${
                       isHighlighted ? 'bg-[#1A2434]' : 'hover:bg-[#161E2C]'
                     }`}
@@ -309,17 +448,17 @@ export function PortfolioView({
                           <span className="text-[11px] text-slate-400">
                             {item.market}
                           </span>
+                          <span className="text-[11px] text-amber-300/90">
+                            {CATEGORY_LABELS_TH[item.category]}
+                          </span>
                         </div>
                         <div className="text-xs text-slate-400 truncate">
-                          {item.name}
+                          {item.name} · {item.sector}
                         </div>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2.5 shrink-0">
-                      <span className="text-[11px] text-slate-400 font-medium">
-                        {CATEGORY_LABELS_TH[item.category]}
-                      </span>
+                    <div className="shrink-0">
                       {alreadyHeld ? (
                         <span className="text-[11px] text-emerald-400 font-medium">
                           มีในพอร์ตแล้ว
@@ -338,27 +477,28 @@ export function PortfolioView({
               {showCustomAddRow && (
                 <button
                   type="button"
-                  onClick={handleAddCustomTicker}
+                  onClick={() => void handleAddCustomTickerWithAI()}
                   className={`w-full px-3.5 py-3 flex items-center justify-between gap-3 text-left bg-amber-500/10 hover:bg-amber-500/15 transition-colors cursor-pointer ${
                     highlightIndex === suggestions.length ? 'bg-amber-500/20' : ''
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
-                    <Plus className="w-4 h-4 text-amber-400 shrink-0" />
-                    <div>
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+                    <div className="min-w-0">
                       <div className="text-xs sm:text-sm font-medium text-amber-200">
-                        เพิ่ม Ticker อิสระ:{' '}
+                        เพิ่ม Ticker อิสระ{' '}
                         <span className="font-mono font-bold">
                           {normalizedQueryTicker}
-                        </span>
+                        </span>{' '}
+                        พร้อมให้ AI ระบุชื่อเต็ม ประเภท และกลุ่มอุตสาหกรรมอัตโนมัติ
                       </div>
                       <div className="text-[11px] text-slate-400">
-                        ประเภทที่เลือก: {CATEGORY_LABELS_TH[customCategory]} (เปลี่ยนประเภทได้ที่ช่องด้านขวา)
+                        รองรับหุ้นไทย SET/mai, US ETF, หุ้นต่างประเทศ, คริปโต และโภคภัณฑ์ทุกตัว
                       </div>
                     </div>
                   </div>
                   <span className="text-xs font-semibold text-amber-300 whitespace-nowrap shrink-0">
-                    เพิ่มทันที
+                    เพิ่มด้วย AI
                   </span>
                 </button>
               )}
@@ -368,17 +508,17 @@ export function PortfolioView({
 
         {/* Quick-add popular tickers */}
         <div className="mt-3.5 flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-slate-500">เพิ่มด่วน:</span>
-          {QUICK_POPULAR_SYMBOLS.map((sym) => {
+          <span className="text-slate-500">เพิ่มด่วนยอดนิยม:</span>
+          {POPULAR_STARTER_TICKERS.map((sym) => {
             const catItem = ASSET_CATALOG.find((c) => c.symbol === sym);
             if (!catItem) return null;
-            const held = heldSymbolSet.has(sym.toUpperCase());
+            const held = isAlreadyHeld(sym);
             return (
               <button
                 key={sym}
                 type="button"
                 disabled={held}
-                onClick={() => handleSelectCatalogItem(catItem)}
+                onClick={() => void handleSelectCatalogItem(catItem)}
                 className={`font-mono text-[11px] px-2.5 py-1 rounded-md border transition-colors whitespace-nowrap shrink-0 ${
                   held
                     ? 'bg-[#0D121A] border-[#1A2230] text-slate-600 cursor-not-allowed'
@@ -392,8 +532,14 @@ export function PortfolioView({
         </div>
 
         {feedbackMsg && (
-          <div className="mt-3 text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3.5 py-2">
-            {feedbackMsg}
+          <div
+            className={`mt-3 text-xs rounded-lg px-3.5 py-2 border ${
+              feedbackMsg.type === 'success'
+                ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30'
+                : 'text-rose-300 bg-rose-500/10 border-rose-500/30'
+            }`}
+          >
+            {feedbackMsg.text}
           </div>
         )}
       </section>
@@ -403,53 +549,84 @@ export function PortfolioView({
         <div className="px-5 py-4 border-b border-[#1E2634] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-slate-100">
-              สินทรัพย์ที่ถือครอง ({portfolio.length})
+              สินทรัพย์ที่ถือครองจริง ({portfolio.length})
             </h2>
             <p className="text-xs text-slate-400 mt-0.5">
-              ระบบตรวจสอบปฏิทินงบการเงิน วันขึ้นเครื่องหมาย XD และข่าวด่วนของแต่ละตัวโดยอัตโนมัติ
+              ระบบวิเคราะห์ความเชื่อมโยงทางตรง/ทางอ้อมกับปฏิทินเศรษฐกิจและข่าวทั่วโลกตามสินทรัพย์จริงในตารางนี้
             </p>
           </div>
 
-          {/* Category segmented filter */}
-          <div className="flex items-center gap-1 p-1 bg-[#090C11] border border-[#1E2634] rounded-lg overflow-x-auto">
-            {(['ALL', 'Stock', 'ETF', 'Crypto', 'Forex'] as const).map((cat) => {
-              const active = activeCategoryFilter === cat;
-              const label = cat === 'ALL' ? 'ทั้งหมด' : CATEGORY_LABELS_TH[cat];
-              return (
-                <button
-                  key={cat}
-                  type="button"
-                  onClick={() => setActiveCategoryFilter(cat)}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                    active
-                      ? 'bg-[#1C2536] text-amber-300'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
+          {portfolio.length > 0 && (
+            <div className="flex items-center gap-1 p-1 bg-[#090C11] border border-[#1E2634] rounded-lg overflow-x-auto">
+              {FILTER_CATEGORIES.map((cat) => {
+                const active = activeCategoryFilter === cat;
+                const label = cat === 'ALL' ? 'ทั้งหมด' : CATEGORY_LABELS_TH[cat];
+                return (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setActiveCategoryFilter(cat)}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      active
+                        ? 'bg-[#1C2536] text-amber-300'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
-        {filteredPortfolio.length === 0 ? (
-          <div className="py-12 px-6 text-center">
-            <p className="text-sm text-slate-400">
-              {portfolio.length === 0
-                ? 'พอร์ตโฟลิโอของคุณยังว่างอยู่ ค้นหาและเพิ่มสินทรัพย์จากช่องด้านบนได้เลย'
-                : 'ไม่พบสินทรัพย์ในหมวดหมู่ที่เลือก'}
-            </p>
+        {portfolio.length === 0 ? (
+          /* Clean 100% Empty State */
+          <div className="py-14 px-6 text-center max-w-xl mx-auto space-y-4">
+            <div className="w-12 h-12 rounded-xl bg-amber-500/12 border border-amber-500/30 flex items-center justify-center mx-auto">
+              <Plus className="w-6 h-6 text-amber-400" />
+            </div>
+            <div>
+              <h3 className="text-base font-semibold text-slate-100">
+                พอร์ตโฟลิโอของคุณยังว่างอยู่
+              </h3>
+              <p className="text-xs sm:text-sm text-slate-400 mt-1 leading-relaxed">
+                เริ่มต้นเพิ่มสินทรัพย์จริงที่คุณถือครอง เช่น QQQM, SMH, GLD, SLV, BLOK หรือหุ้นไทยอย่าง KCG, PTT เพื่อเปิดระบบ Smart Portfolio Alert และการวิเคราะห์ผลกระทบทางตรง/ทางอ้อมแบบเรียลไทม์
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={focusSearchInput}
+                className="px-4 py-2.5 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ เพิ่มสินทรัพย์ในพอร์ต</span>
+              </button>
+              {!isSignedInLocal && (
+                <button
+                  type="button"
+                  onClick={onOpenAuth}
+                  className="px-4 py-2.5 text-xs font-medium rounded-lg bg-[#161E2B] border border-[#253042] text-slate-200 hover:border-amber-500/50 transition-colors cursor-pointer"
+                >
+                  เข้าสู่ระบบ / สมัครสมาชิก (แยกพอร์ตตามบัญชี)
+                </button>
+              )}
+            </div>
+          </div>
+        ) : filteredPortfolio.length === 0 ? (
+          <div className="py-10 px-6 text-center text-sm text-slate-400">
+            ไม่พบสินทรัพย์ในหมวดหมู่ที่เลือก
           </div>
         ) : (
           <div className="divide-y divide-[#1A2230]">
             {filteredPortfolio.map((asset) => {
-              const alert = getAlertsForAsset(asset.symbol, calendarEvents, newsItems);
-              const hasUpcoming =
-                alert.earningsCount > 0 ||
-                alert.dividendCount > 0 ||
-                alert.economicCount > 0 ||
-                alert.newsCount > 0;
+              const alert = getAlertsForAsset(asset, calendarEvents, newsItems);
+              const totalCalCount =
+                alert.earningsCount +
+                alert.dividendCount +
+                alert.economicDirectCount +
+                alert.economicIndirectCount;
 
               return (
                 <div
@@ -483,16 +660,22 @@ export function PortfolioView({
                             ใกล้ขึ้น XD ปันผล
                           </span>
                         )}
-                        {alert.newsCount > 0 &&
-                          alert.earningsCount === 0 &&
-                          alert.dividendCount === 0 && (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-300 bg-amber-500/15 border border-amber-500/35 px-2 py-0.5 rounded whitespace-nowrap">
-                              มีข่าวสำคัญ ({alert.newsCount})
-                            </span>
-                          )}
+                        {alert.economicDirectCount > 0 && (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-300 bg-amber-500/15 border border-amber-500/35 px-2 py-0.5 rounded whitespace-nowrap">
+                            กระทบทางตรง {alert.economicDirectCount}
+                          </span>
+                        )}
+                        {alert.economicIndirectCount > 0 && (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-300 bg-sky-500/12 border border-sky-500/30 px-2 py-0.5 rounded whitespace-nowrap">
+                            ทางอ้อม {alert.economicIndirectCount}
+                          </span>
+                        )}
                       </div>
-                      <div className="text-xs text-slate-400 mt-0.5 truncate">
+                      <div className="text-xs text-slate-300 mt-0.5 truncate">
                         {asset.name}
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-0.5 truncate">
+                        กลุ่มอุตสาหกรรม: {asset.sector}
                       </div>
                       {alert.nextEventTitle && (
                         <div className="text-xs text-amber-200/90 mt-1.5 flex items-center gap-1.5">
@@ -505,35 +688,31 @@ export function PortfolioView({
                     </div>
                   </div>
 
-                  {/* Quick Actions & Alert Counts */}
+                  {/* Quick Actions */}
                   <div className="flex flex-wrap items-center gap-2 lg:justify-end shrink-0">
-                    {hasUpcoming && (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => onNavigate('calendar', { onlyPortfolio: true })}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-300 bg-[#161E2B] border border-[#243043] hover:border-amber-500/50 hover:text-amber-200 transition-colors whitespace-nowrap cursor-pointer"
-                        >
-                          <Calendar className="w-3.5 h-3.5 text-amber-400" />
-                          <span>
-                            ปฏิทิน ({alert.earningsCount + alert.dividendCount + alert.economicCount})
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            onNavigate('news', { searchQuery: asset.symbol })
-                          }
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-300 bg-[#161E2B] border border-[#243043] hover:border-sky-500/50 hover:text-sky-200 transition-colors whitespace-nowrap cursor-pointer"
-                        >
-                          <Newspaper className="w-3.5 h-3.5 text-sky-400" />
-                          <span>ข่าว ({alert.newsCount})</span>
-                        </button>
-                      </>
+                    {totalCalCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => onNavigate('calendar', { onlyPortfolio: true })}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-300 bg-[#161E2B] border border-[#243043] hover:border-amber-500/50 hover:text-amber-200 transition-colors whitespace-nowrap cursor-pointer"
+                      >
+                        <Calendar className="w-3.5 h-3.5 text-amber-400" />
+                        <span>ปฏิทิน ({totalCalCount})</span>
+                      </button>
+                    )}
+                    {alert.newsCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => onNavigate('news', { onlyPortfolio: true })}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-300 bg-[#161E2B] border border-[#243043] hover:border-sky-500/50 hover:text-sky-200 transition-colors whitespace-nowrap cursor-pointer"
+                      >
+                        <Newspaper className="w-3.5 h-3.5 text-sky-400" />
+                        <span>ข่าว ({alert.newsCount})</span>
+                      </button>
                     )}
                     <button
                       type="button"
-                      onClick={() => onRemoveAsset(asset.id)}
+                      onClick={() => void onRemoveAsset(asset.id)}
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
                       aria-label={`ลบ ${asset.symbol} ออกจากพอร์ต`}
                     >

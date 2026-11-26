@@ -2,23 +2,83 @@
 <html lang="th" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>InvestCal — ปฏิทินการลงทุนและข่าวเศรษฐกิจโลก</title>
-    <meta name="description" content="ปฏิทินการลงทุน ข่าวสารเศรษฐกิจทั่วโลก และระบบวิเคราะห์ผลกระทบต่อสินทรัพย์ในพอร์ตโฟลิโอแบบเรียลไทม์" />
+    <meta name="description" content="ปฏิทินการลงทุน ข่าวสารเศรษฐกิจทั่วโลก งบการเงิน วัน XD ฟีดโซเชียล และวิเคราะห์ผลกระทบต่อสินทรัพย์ในพอร์ตโฟลิโอแบบเรียลไทม์" />
     <meta property="og:title" content="InvestCal — ปฏิทินการลงทุนและข่าวเศรษฐกิจโลก" />
-    <meta property="og:description" content="ปฏิทินการลงทุน ข่าวสารเศรษฐกิจทั่วโลก และระบบวิเคราะห์ผลกระทบต่อสินทรัพย์ในพอร์ตโฟลิโอแบบเรียลไทม์" />
+    <meta property="og:description" content="ปฏิทินการลงทุน ข่าวสารเศรษฐกิจทั่วโลก งบการเงิน วัน XD ฟีดโซเชียล และวิเคราะห์ผลกระทบต่อสินทรัพย์ในพอร์ตโฟลิโอแบบเรียลไทม์" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#090C11" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="InvestCal" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Prompt:wght@300;400;500;600;700&display=swap"
       rel="stylesheet"
     />
+    <script>
+      (function () {
+        try {
+          var desc = Object.getOwnPropertyDescriptor(window, 'fetch');
+          if (desc && typeof desc.get === 'function' && !desc.set && desc.configurable) {
+            Object.defineProperty(window, 'fetch', {
+              configurable: true,
+              enumerable: desc.enumerable,
+              get: desc.get,
+              set: function () {
+                // Ignore third-party extension attempts to overwrite getter-only window.fetch
+              },
+            });
+          }
+        } catch (_err) {
+          // Ignore if non-configurable
+        }
+
+        var isExtensionError = function (filename, stack) {
+          var src = String(filename || '') + ' ' + String(stack || '');
+          return (
+            src.indexOf('chrome-extension://') !== -1 ||
+            src.indexOf('moz-extension://') !== -1 ||
+            src.indexOf('safari-extension://') !== -1
+          );
+        };
+
+        window.addEventListener(
+          'error',
+          function (event) {
+            var stack = event && event.error && event.error.stack;
+            if (isExtensionError(event && event.filename, stack)) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+
+        window.addEventListener(
+          'unhandledrejection',
+          function (event) {
+            var reason = event && event.reason;
+            var stack = reason && reason.stack;
+            if (isExtensionError('', stack)) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+      })();
+    </script>
   </head>
   <body class="bg-[#090C11] text-[#E6EDF3] antialiased selection:bg-amber-500/30 selection:text-amber-200">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

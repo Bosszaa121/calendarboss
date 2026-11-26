@@ -1,29 +1,35 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronDown, ChevronUp, Filter, RotateCcw } from 'lucide-react';
+import { ChevronDown, ChevronUp, Filter, Plus, RotateCcw } from 'lucide-react';
 import {
+  AssetDirectionForecast,
   CalendarEvent,
   DateTabKey,
   EventCategory,
   ImpactLevel,
+  PortfolioAsset,
+  PortfolioImpactDetail,
 } from '../types';
 import {
+  analyzePortfolioImpacts,
+  computeEventAssetDirections,
   formatThaiShortDate,
-  getMatchedPortfolioSymbols,
-  isAssetTagMatched,
   matchesDateTab,
 } from '../utils/portfolioMatcher';
 import {
-  AssetTickerTag,
+  AssetDirectionForecastList,
   ImpactRating,
+  PortfolioImpactMatrix,
   PortfolioMatchBadge,
 } from './ImpactRating';
 
 interface CalendarViewProps {
   events: CalendarEvent[];
+  portfolio: PortfolioAsset[];
   portfolioMap: Map<string, string>;
   onlyPortfolio: boolean;
   onToggleOnlyPortfolio: (val: boolean) => void;
   onAssetTagClick: (symbol: string) => void;
+  onGoToPortfolio: () => void;
 }
 
 const DATE_TABS: Array<{ key: DateTabKey; label: string }> = [
@@ -34,6 +40,17 @@ const DATE_TABS: Array<{ key: DateTabKey; label: string }> = [
   { key: 'next_week', label: 'สัปดาห์หน้า' },
 ];
 
+const COUNTRY_FILTER_OPTIONS: Array<{ code: string; flag: string; label: string }> = [
+  { code: 'ALL', flag: '🌐', label: 'ทั้งหมด' },
+  { code: 'US', flag: '🇺🇸', label: 'สหรัฐฯ' },
+  { code: 'TH', flag: '🇹🇭', label: 'ไทย' },
+  { code: 'CN', flag: '🇨🇳', label: 'จีน' },
+  { code: 'EU', flag: '🇪🇺', label: 'ยุโรป' },
+  { code: 'JP', flag: '🇯🇵', label: 'ญี่ปุ่น' },
+  { code: 'GB', flag: '🇬🇧', label: 'อังกฤษ' },
+  { code: 'NZ', flag: '🇳🇿', label: 'นิวซีแลนด์' },
+];
+
 const EVENT_CATEGORY_LABELS: Record<EventCategory, string> = {
   economic: 'ตัวเลขเศรษฐกิจ',
   earnings: 'ประกาศงบ',
@@ -42,26 +59,44 @@ const EVENT_CATEGORY_LABELS: Record<EventCategory, string> = {
 
 export function CalendarView({
   events,
+  portfolio,
   portfolioMap,
   onlyPortfolio,
   onToggleOnlyPortfolio,
   onAssetTagClick,
+  onGoToPortfolio,
 }: CalendarViewProps) {
   const [dateTab, setDateTab] = useState<DateTabKey>('today');
   const [impactFilter, setImpactFilter] = useState<'ALL' | ImpactLevel>('ALL');
   const [categoryFilter, setCategoryFilter] = useState<'ALL' | EventCategory>('ALL');
-  const [currencyFilter, setCurrencyFilter] = useState<string>('ALL');
+  const [countryFilter, setCountryFilter] = useState<string>('ALL');
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
 
-  const availableCurrencies = useMemo(() => {
-    const map = new Map<string, { currency: string; flag: string }>();
+  // Compute live direct/indirect impacts AND directional forecasts (🟢 ขึ้น / 🔴 ลง / ⚪ คงที่)
+  const eventAnalysisMap = useMemo(() => {
+    const map = new Map<
+      string,
+      { impacts: PortfolioImpactDetail[]; directions: AssetDirectionForecast[] }
+    >();
     for (const ev of events) {
-      if (!map.has(ev.currency)) {
-        map.set(ev.currency, { currency: ev.currency, flag: ev.flag });
-      }
+      const impacts = analyzePortfolioImpacts(
+        {
+          title: ev.title,
+          description: ev.descriptionTh,
+          currency: ev.currency,
+          category: ev.category,
+          relatedAssets: ev.relatedAssets,
+          macroTags: ev.macroTags,
+          aiImpacts: ev.aiImpacts,
+        },
+        portfolio,
+        portfolioMap
+      );
+      const directions = computeEventAssetDirections(ev, portfolio, portfolioMap, impacts);
+      map.set(ev.id, { impacts, directions });
     }
-    return Array.from(map.values());
-  }, [events]);
+    return map;
+  }, [events, portfolio, portfolioMap]);
 
   const tabCounts = useMemo(() => {
     const counts: Record<DateTabKey, number> = {
@@ -74,17 +109,17 @@ export function CalendarView({
     for (const tab of DATE_TABS) {
       counts[tab.key] = events.filter((ev) => {
         if (!matchesDateTab(ev.date, tab.key)) return false;
-        if (
-          onlyPortfolio &&
-          getMatchedPortfolioSymbols(ev.relatedAssets, portfolioMap).length === 0
-        ) {
+        if (countryFilter !== 'ALL' && ev.countryCode.toUpperCase() !== countryFilter) {
+          return false;
+        }
+        if (onlyPortfolio && (eventAnalysisMap.get(ev.id)?.impacts.length ?? 0) === 0) {
           return false;
         }
         return true;
       }).length;
     }
     return counts;
-  }, [events, onlyPortfolio, portfolioMap]);
+  }, [events, onlyPortfolio, countryFilter, eventAnalysisMap]);
 
   const filteredEvents = useMemo(() => {
     return events
@@ -92,9 +127,11 @@ export function CalendarView({
         if (!matchesDateTab(ev.date, dateTab)) return false;
         if (impactFilter !== 'ALL' && ev.impact !== impactFilter) return false;
         if (categoryFilter !== 'ALL' && ev.category !== categoryFilter) return false;
-        if (currencyFilter !== 'ALL' && ev.currency !== currencyFilter) return false;
+        if (countryFilter !== 'ALL' && ev.countryCode.toUpperCase() !== countryFilter) {
+          return false;
+        }
         if (onlyPortfolio) {
-          return getMatchedPortfolioSymbols(ev.relatedAssets, portfolioMap).length > 0;
+          return (eventAnalysisMap.get(ev.id)?.impacts.length ?? 0) > 0;
         }
         return true;
       })
@@ -104,16 +141,18 @@ export function CalendarView({
     dateTab,
     impactFilter,
     categoryFilter,
-    currencyFilter,
+    countryFilter,
     onlyPortfolio,
-    portfolioMap,
+    eventAnalysisMap,
   ]);
 
-  const matchedCountInView = useMemo(() => {
-    return filteredEvents.filter(
-      (ev) => getMatchedPortfolioSymbols(ev.relatedAssets, portfolioMap).length > 0
-    ).length;
-  }, [filteredEvents, portfolioMap]);
+  const matchedCountInView = useMemo(
+    () =>
+      filteredEvents.filter(
+        (ev) => (eventAnalysisMap.get(ev.id)?.impacts.length ?? 0) > 0
+      ).length,
+    [filteredEvents, eventAnalysisMap]
+  );
 
   function toggleExpand(id: string) {
     setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -122,22 +161,21 @@ export function CalendarView({
   function resetFilters() {
     setImpactFilter('ALL');
     setCategoryFilter('ALL');
-    setCurrencyFilter('ALL');
+    setCountryFilter('ALL');
     onToggleOnlyPortfolio(false);
   }
 
   const hasActiveFilters =
     impactFilter !== 'ALL' ||
     categoryFilter !== 'ALL' ||
-    currencyFilter !== 'ALL' ||
+    countryFilter !== 'ALL' ||
     onlyPortfolio;
 
   return (
     <div className="space-y-5">
-      {/* Date Range Tabs + Portfolio Switch */}
-      <section className="bg-[#10151E] border border-[#1E2634] rounded-xl p-4 space-y-4">
+      {/* Date Range Tabs + Country Filter Bar + Portfolio Switch */}
+      <section className="bg-[#10151E] border border-[#1E2634] rounded-xl p-4 space-y-3.5">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          {/* 5 Date Range Tabs (14 days forward) */}
           <div
             role="tablist"
             aria-label="เลือกช่วงเวลาปฏิทิน"
@@ -171,7 +209,6 @@ export function CalendarView({
             })}
           </div>
 
-          {/* Toggle Switch: Portfolio Only */}
           <button
             type="button"
             role="switch"
@@ -195,14 +232,38 @@ export function CalendarView({
           </button>
         </div>
 
-        {/* Filter Controls Row */}
+        {/* Country Flag Filter Button Bar */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pt-3 border-t border-[#1A2230] pb-0.5">
+          <span className="text-xs text-slate-400 mr-1 whitespace-nowrap shrink-0">
+            กรองประเทศ:
+          </span>
+          {COUNTRY_FILTER_OPTIONS.map((c) => {
+            const active = countryFilter === c.code;
+            return (
+              <button
+                key={c.code}
+                type="button"
+                onClick={() => setCountryFilter(c.code)}
+                className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                  active
+                    ? 'bg-amber-500/15 border-amber-500/50 text-amber-200'
+                    : 'bg-[#090C11] border-[#222C3D] text-slate-300 hover:border-slate-600 hover:text-slate-100'
+                }`}
+              >
+                <span>{c.flag}</span>
+                <span>{c.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Secondary Filter Controls + Direction Legend */}
         <div className="flex flex-wrap items-center gap-2.5 pt-3 border-t border-[#1A2230]">
           <div className="inline-flex items-center gap-1.5 text-xs text-slate-400 mr-1">
             <Filter className="w-3.5 h-3.5" />
             <span>ตัวกรอง:</span>
           </div>
 
-          {/* Impact Filter */}
           <select
             value={impactFilter}
             onChange={(e) => {
@@ -218,7 +279,6 @@ export function CalendarView({
             <option value="1">ระดับต่ำ (1 กระทิง)</option>
           </select>
 
-          {/* Event Category Filter */}
           <select
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value as 'ALL' | EventCategory)}
@@ -229,21 +289,6 @@ export function CalendarView({
             <option value="economic">ตัวเลขเศรษฐกิจ (Macro)</option>
             <option value="earnings">ประกาศงบ (Earnings)</option>
             <option value="dividend">ปันผล (XD)</option>
-          </select>
-
-          {/* Currency / Country Filter */}
-          <select
-            value={currencyFilter}
-            onChange={(e) => setCurrencyFilter(e.target.value)}
-            aria-label="กรองตามประเทศหรือสกุลเงิน"
-            className="bg-[#090C11] border border-[#253042] rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500/70 cursor-pointer"
-          >
-            <option value="ALL">ประเทศ/สกุลเงิน: ทั้งหมด</option>
-            {availableCurrencies.map((c) => (
-              <option key={c.currency} value={c.currency}>
-                {c.flag} {c.currency}
-              </option>
-            ))}
           </select>
 
           {hasActiveFilters && (
@@ -257,42 +302,67 @@ export function CalendarView({
             </button>
           )}
 
-          <div className="ml-auto text-xs text-slate-400 hidden sm:block">
-            แสดง{' '}
-            <span className="font-mono tabular-nums text-slate-200 font-medium">
-              {filteredEvents.length}
-            </span>{' '}
-            รายการ
-            {matchedCountInView > 0 && (
-              <>
-                <span className="mx-1.5 text-slate-600" aria-hidden="true">·</span>
-                <span className="text-amber-300 font-medium">
-                  กระทบพอร์ต {matchedCountInView} รายการ
-                </span>
-              </>
-            )}
+          {/* Legend for Directional Chips */}
+          <div className="ml-auto flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
+            <span className="inline-flex items-center gap-1 text-emerald-300">
+              <span className="w-2 h-2 rounded-full bg-emerald-400" />
+              ขึ้น (Bullish)
+            </span>
+            <span className="inline-flex items-center gap-1 text-rose-300">
+              <span className="w-2 h-2 rounded-full bg-rose-400" />
+              ลง (Bearish)
+            </span>
+            <span className="inline-flex items-center gap-1 text-slate-300">
+              <span className="w-2 h-2 rounded-full bg-slate-400" />
+              คงที่ (Neutral)
+            </span>
+            <span className="hidden xl:inline text-slate-500">
+              · แสดง {filteredEvents.length} รายการ
+              {matchedCountInView > 0 ? ` (พอร์ต ${matchedCountInView})` : ''}
+            </span>
           </div>
         </div>
       </section>
 
-      {/* Main Calendar Data Table (Desktop) & Card List (Mobile) */}
+      {/* Main Calendar Table & Mobile Cards */}
       <section className="bg-[#10151E] border border-[#1E2634] rounded-xl overflow-hidden">
         {filteredEvents.length === 0 ? (
-          <div className="py-14 px-6 text-center">
-            <p className="text-sm text-slate-300 font-medium">
-              ไม่พบเหตุการณ์ตามเงื่อนไขที่เลือกในช่วงเวลานี้
-            </p>
-            <p className="text-xs text-slate-500 mt-1">
-              ลองเปลี่ยนแท็บช่วงเวลาเป็น &quot;สัปดาห์นี้&quot; หรือ &quot;สัปดาห์หน้า&quot; หรือปิดตัวกรองบางรายการ
-            </p>
-            {hasActiveFilters && (
-              <button
-                type="button"
-                onClick={resetFilters}
-                className="mt-4 px-4 py-2 text-xs font-medium rounded-lg bg-[#161E2B] border border-[#283549] text-slate-200 hover:bg-[#1E293B] transition-colors cursor-pointer"
-              >
-                แสดงเหตุการณ์ทั้งหมด
-              </button>
+          <div className="py-14 px-6 text-center space-y-3">
+            {onlyPortfolio && portfolio.length === 0 ? (
+              <>
+                <p className="text-sm text-slate-200 font-medium">
+                  พอร์ตโฟลิโอของคุณยังไม่มีสินทรัพย์
+                </p>
+                <p className="text-xs text-slate-400">
+                  เพิ่มสินทรัพย์จริงของคุณก่อน เพื่อให้ระบบคัดกรองและคาดการณ์ทิศทางสินทรัพย์แบบเรียลไทม์
+                </p>
+                <button
+                  type="button"
+                  onClick={onGoToPortfolio}
+                  className="mt-2 px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>+ เพิ่มสินทรัพย์ในพอร์ต</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-slate-300 font-medium">
+                  ไม่พบเหตุการณ์ตามเงื่อนไขที่เลือกในช่วงเวลานี้
+                </p>
+                <p className="text-xs text-slate-500">
+                  ลองเปลี่ยนแท็บช่วงเวลาเป็น &quot;สัปดาห์นี้&quot; หรือ &quot;สัปดาห์หน้า&quot; หรือเลือกประเทศเป็น &quot;ทั้งหมด&quot;
+                </p>
+                {hasActiveFilters && (
+                  <button
+                    type="button"
+                    onClick={resetFilters}
+                    className="mt-2 px-4 py-2 text-xs font-medium rounded-lg bg-[#161E2B] border border-[#283549] text-slate-200 hover:bg-[#1E293B] transition-colors cursor-pointer"
+                  >
+                    แสดงเหตุการณ์ทั้งหมด
+                  </button>
+                )}
+              </>
             )}
           </div>
         ) : (
@@ -305,7 +375,9 @@ export function CalendarView({
                     <th className="py-3 px-4 whitespace-nowrap">เวลา / วันที่</th>
                     <th className="py-3 px-3 whitespace-nowrap">ประเทศ</th>
                     <th className="py-3 px-3 whitespace-nowrap">ความสำคัญ</th>
-                    <th className="py-3 px-3">เหตุการณ์ &amp; สินทรัพย์ที่เกี่ยวข้อง</th>
+                    <th className="py-3 px-3">
+                      เหตุการณ์ &amp; คาดการณ์ทิศทางสินทรัพย์ (ขึ้น / ลง / คงที่)
+                    </th>
                     <th className="py-3 px-3 text-right whitespace-nowrap">ค่าจริง</th>
                     <th className="py-3 px-3 text-right whitespace-nowrap">คาดการณ์</th>
                     <th className="py-3 px-4 text-right whitespace-nowrap">ครั้งก่อน</th>
@@ -313,9 +385,14 @@ export function CalendarView({
                 </thead>
                 <tbody className="divide-y divide-[#1A2230]">
                   {filteredEvents.map((ev) => {
-                    const matched = getMatchedPortfolioSymbols(ev.relatedAssets, portfolioMap);
-                    const isMatched = matched.length > 0;
+                    const analysis = eventAnalysisMap.get(ev.id);
+                    const impacts = analysis?.impacts ?? [];
+                    const directions = analysis?.directions ?? [];
+                    const directCount = impacts.filter((i) => i.relation === 'direct').length;
+                    const indirectCount = impacts.length - directCount;
+                    const isMatched = impacts.length > 0;
                     const expanded = Boolean(expandedIds[ev.id]);
+                    const isReleased = ev.actualOutcome !== 'pending' && ev.actual !== '—';
 
                     const actualColor =
                       ev.actualOutcome === 'better'
@@ -331,17 +408,22 @@ export function CalendarView({
                         <tr
                           onClick={() => toggleExpand(ev.id)}
                           className={`transition-colors cursor-pointer ${
-                            isMatched
+                            directCount > 0
                               ? 'bg-amber-500/[0.06] hover:bg-amber-500/[0.11]'
+                              : indirectCount > 0
+                              ? 'bg-sky-500/[0.04] hover:bg-sky-500/[0.08]'
                               : 'hover:bg-[#151C28]'
                           }`}
                         >
-                          {/* Time & Date */}
                           <td className="py-3.5 px-4 align-top whitespace-nowrap">
                             <div className="flex items-start gap-2.5">
                               <span
                                 className={`w-1 h-8 rounded-full mt-0.5 shrink-0 ${
-                                  isMatched ? 'bg-amber-400' : 'bg-transparent'
+                                  directCount > 0
+                                    ? 'bg-amber-400'
+                                    : indirectCount > 0
+                                    ? 'bg-sky-400'
+                                    : 'bg-transparent'
                                 }`}
                                 aria-hidden="true"
                               />
@@ -356,35 +438,37 @@ export function CalendarView({
                             </div>
                           </td>
 
-                          {/* Flag + Currency */}
                           <td className="py-3.5 px-3 align-top whitespace-nowrap">
                             <div className="inline-flex items-center gap-2">
-                              <span className="text-base leading-none">{ev.flag}</span>
+                              <span className="text-lg leading-none">{ev.flag}</span>
                               <div>
-                                <div className="font-mono text-xs font-semibold text-slate-100">
-                                  {ev.currency}
-                                </div>
-                                <div className="text-[11px] text-slate-500">
+                                <div className="text-xs font-semibold text-slate-100">
                                   {ev.countryNameTh}
+                                </div>
+                                <div className="font-mono text-[11px] text-slate-500">
+                                  {ev.currency}
                                 </div>
                               </div>
                             </div>
                           </td>
 
-                          {/* Impact */}
                           <td className="py-3.5 px-3 align-top whitespace-nowrap">
                             <div className="pt-0.5">
                               <ImpactRating level={ev.impact} />
                             </div>
                           </td>
 
-                          {/* Event Title + Category + Asset Tags */}
-                          <td className="py-3.5 px-3 align-top min-w-[280px]">
+                          <td className="py-3.5 px-3 align-top min-w-[320px]">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="text-sm font-medium text-slate-100 leading-snug">
                                 {ev.title}
                               </span>
-                              {isMatched && <PortfolioMatchBadge />}
+                              {isMatched && (
+                                <PortfolioMatchBadge
+                                  directCount={directCount}
+                                  indirectCount={indirectCount}
+                                />
+                              )}
                               {ev.isLiveSynced && (
                                 <span className="text-[10px] font-medium text-sky-300 bg-sky-500/15 px-1.5 py-0.5 rounded">
                                   ข้อมูลสด
@@ -404,12 +488,10 @@ export function CalendarView({
                               >
                                 {EVENT_CATEGORY_LABELS[ev.category]}
                               </span>
-                              {ev.subtitle && (
-                                <>
-                                  <span aria-hidden="true">·</span>
-                                  <span>{ev.subtitle}</span>
-                                </>
-                              )}
+                              <span aria-hidden="true">·</span>
+                              <span className={isReleased ? 'text-emerald-300/90' : 'text-amber-300/90'}>
+                                {isReleased ? 'ประกาศแล้ว (เทียบคาดการณ์)' : 'รอประกาศ (คาดการณ์แนวโน้ม)'}
+                              </span>
                               <span aria-hidden="true">·</span>
                               <span className="inline-flex items-center gap-0.5 text-slate-500">
                                 รายละเอียด
@@ -421,35 +503,35 @@ export function CalendarView({
                               </span>
                             </div>
 
-                            {ev.relatedAssets.length > 0 && (
-                              <div className="flex flex-wrap items-center gap-1.5 mt-2">
-                                {ev.relatedAssets.map((tag) => (
-                                  <AssetTickerTag
-                                    key={tag}
-                                    symbol={tag}
-                                    matched={isAssetTagMatched(tag, portfolioMap)}
-                                    onClick={() => onAssetTagClick(tag)}
-                                  />
-                                ))}
-                              </div>
+                            {/* Directional Asset Forecast Chips (🟢 ขึ้น / 🔴 ลง / ⚪ คงที่) */}
+                            <AssetDirectionForecastList
+                              forecasts={directions}
+                              isReleased={isReleased}
+                              onTickerClick={onAssetTagClick}
+                            />
+
+                            {/* Portfolio Direct/Indirect Correlation Matrix if matched */}
+                            {isMatched && (
+                              <PortfolioImpactMatrix
+                                impacts={impacts}
+                                compact={!expanded}
+                                onTickerClick={onAssetTagClick}
+                              />
                             )}
                           </td>
 
-                          {/* Actual */}
                           <td className="py-3.5 px-3 align-top text-right whitespace-nowrap">
                             <span className={`font-mono tabular-nums text-sm ${actualColor}`}>
                               {ev.actual}
                             </span>
                           </td>
 
-                          {/* Forecast */}
                           <td className="py-3.5 px-3 align-top text-right whitespace-nowrap">
                             <span className="font-mono tabular-nums text-sm text-slate-300">
                               {ev.forecast}
                             </span>
                           </td>
 
-                          {/* Previous */}
                           <td className="py-3.5 px-4 align-top text-right whitespace-nowrap">
                             <span className="font-mono tabular-nums text-sm text-slate-400">
                               {ev.previous}
@@ -459,20 +541,27 @@ export function CalendarView({
 
                         {expanded && (
                           <tr className="bg-[#0C1118]">
-                            <td colSpan={7} className="px-6 py-3.5 border-t border-[#1A2230]/70">
-                              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 text-xs">
-                                <p className="text-slate-300 leading-relaxed max-w-3xl">
-                                  <span className="text-amber-400 font-medium mr-1.5">
-                                    มุมมองผลกระทบตลาด:
-                                  </span>
-                                  {ev.descriptionTh || 'ติดตามความผันผวนของสินทรัพย์ที่เกี่ยวข้องในช่วงเวลาประกาศตัวเลข'}
-                                </p>
-                                {isMatched && (
-                                  <span className="text-amber-300 font-mono text-[11px] whitespace-nowrap shrink-0">
-                                    ตรงกับพอร์ต: {matched.join(', ')}
-                                  </span>
-                                )}
-                              </div>
+                            <td colSpan={7} className="px-6 py-3.5 border-t border-[#1A2230]/70 space-y-2">
+                              <p className="text-xs text-slate-300 leading-relaxed max-w-4xl">
+                                <span className="text-amber-400 font-medium mr-1.5">
+                                  ภาพรวมผลกระทบต่อตลาดโลก:
+                                </span>
+                                {ev.descriptionTh ||
+                                  'ติดตามความผันผวนของสินทรัพย์ที่เกี่ยวข้องในช่วงเวลาประกาศตัวเลข'}
+                              </p>
+                              {directions.length > 0 && (
+                                <div className="space-y-1 pt-1">
+                                  {directions.map((fc) => (
+                                    <div key={fc.symbol} className="text-xs text-slate-400 flex flex-wrap gap-x-2">
+                                      <strong className="font-mono text-slate-200">{fc.symbol}:</strong>
+                                      <span>{fc.reasonTh}</span>
+                                      {fc.scenarioNoteTh && (
+                                        <span className="text-amber-300/85">({fc.scenarioNoteTh})</span>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
                             </td>
                           </tr>
                         )}
@@ -486,9 +575,14 @@ export function CalendarView({
             {/* Mobile Card Rows */}
             <div className="md:hidden divide-y divide-[#1A2230]">
               {filteredEvents.map((ev) => {
-                const matched = getMatchedPortfolioSymbols(ev.relatedAssets, portfolioMap);
-                const isMatched = matched.length > 0;
+                const analysis = eventAnalysisMap.get(ev.id);
+                const impacts = analysis?.impacts ?? [];
+                const directions = analysis?.directions ?? [];
+                const directCount = impacts.filter((i) => i.relation === 'direct').length;
+                const indirectCount = impacts.length - directCount;
+                const isMatched = impacts.length > 0;
                 const expanded = Boolean(expandedIds[ev.id]);
+                const isReleased = ev.actualOutcome !== 'pending' && ev.actual !== '—';
 
                 const actualColor =
                   ev.actualOutcome === 'better'
@@ -502,14 +596,20 @@ export function CalendarView({
                     key={ev.id}
                     onClick={() => toggleExpand(ev.id)}
                     className={`p-4 space-y-2.5 transition-colors ${
-                      isMatched ? 'bg-amber-500/[0.06]' : ''
+                      directCount > 0
+                        ? 'bg-amber-500/[0.06]'
+                        : indirectCount > 0
+                        ? 'bg-sky-500/[0.04]'
+                        : ''
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2 text-xs">
                         {isMatched && (
                           <span
-                            className="w-1 h-4 rounded-full bg-amber-400 shrink-0"
+                            className={`w-1 h-4 rounded-full shrink-0 ${
+                              directCount > 0 ? 'bg-amber-400' : 'bg-sky-400'
+                            }`}
                             aria-hidden="true"
                           />
                         )}
@@ -521,11 +621,11 @@ export function CalendarView({
                           {formatThaiShortDate(ev.date)}
                         </span>
                         <span className="text-slate-500">·</span>
-                        <span className="font-mono text-slate-200">
-                          {ev.flag} {ev.currency}
+                        <span className="text-slate-200 font-medium">
+                          {ev.flag} {ev.countryNameTh}
                         </span>
                       </div>
-                      <ImpactRating level={ev.impact} />
+                      <ImpactRating level={ev.impact} showLabel={false} />
                     </div>
 
                     <div>
@@ -533,15 +633,19 @@ export function CalendarView({
                         <h3 className="text-sm font-medium text-slate-100 leading-snug">
                           {ev.title}
                         </h3>
-                        {isMatched && <PortfolioMatchBadge />}
+                        {isMatched && (
+                          <PortfolioMatchBadge
+                            directCount={directCount}
+                            indirectCount={indirectCount}
+                          />
+                        )}
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5">
-                        {EVENT_CATEGORY_LABELS[ev.category]}
-                        {ev.subtitle ? ` · ${ev.subtitle}` : ''}
+                        {EVENT_CATEGORY_LABELS[ev.category]} ·{' '}
+                        {isReleased ? 'ประกาศแล้ว' : 'รอประกาศ'}
                       </div>
                     </div>
 
-                    {/* Actual | Forecast | Previous Strip */}
                     <div className="grid grid-cols-3 gap-2 py-2 px-3 rounded-lg bg-[#0B0F16] border border-[#1B2331] text-center">
                       <div>
                         <div className="text-[10px] text-slate-500">ค่าจริง</div>
@@ -563,16 +667,19 @@ export function CalendarView({
                       </div>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {ev.relatedAssets.map((tag) => (
-                        <AssetTickerTag
-                          key={tag}
-                          symbol={tag}
-                          matched={isAssetTagMatched(tag, portfolioMap)}
-                          onClick={() => onAssetTagClick(tag)}
-                        />
-                      ))}
-                    </div>
+                    <AssetDirectionForecastList
+                      forecasts={directions}
+                      isReleased={isReleased}
+                      onTickerClick={onAssetTagClick}
+                    />
+
+                    {isMatched && (
+                      <PortfolioImpactMatrix
+                        impacts={impacts}
+                        compact={!expanded}
+                        onTickerClick={onAssetTagClick}
+                      />
+                    )}
 
                     {expanded && ev.descriptionTh && (
                       <p className="text-xs text-slate-300 leading-relaxed pt-2 border-t border-[#1E2634]">

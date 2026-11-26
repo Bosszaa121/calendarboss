@@ -1,6 +1,12 @@
 import React from 'react';
 import { TrendingUp, TrendingDown, Minus } from 'lucide-react';
-import { ImpactLevel, Sentiment } from '../types';
+import {
+  AssetDirection,
+  AssetDirectionForecast,
+  ImpactLevel,
+  PortfolioImpactDetail,
+  Sentiment,
+} from '../types';
 
 function BullIcon({ active, colorClass }: { active: boolean; colorClass: string }) {
   return (
@@ -51,17 +57,21 @@ export function ImpactRating({
 export function AssetTickerTag({
   symbol,
   matched,
+  relation,
   onClick,
 }: {
   symbol: string;
   matched: boolean;
+  relation?: 'direct' | 'indirect';
   onClick?: () => void;
 }) {
   const baseClass =
-    'inline-flex items-center font-mono text-[11px] font-medium px-2 py-0.5 rounded transition-all whitespace-nowrap shrink-0';
+    'inline-flex items-center gap-1 font-mono text-[11px] font-medium px-2 py-0.5 rounded transition-all whitespace-nowrap shrink-0';
 
   const styleClass = matched
-    ? 'bg-amber-500/20 text-amber-200 ticker-glow font-semibold'
+    ? relation === 'indirect'
+      ? 'bg-sky-500/15 text-sky-200 border border-sky-400/50 font-semibold'
+      : 'bg-amber-500/20 text-amber-200 ticker-glow font-semibold'
     : 'bg-[#161E2B] text-slate-300 border border-slate-800 hover:border-slate-700';
 
   if (onClick) {
@@ -75,7 +85,7 @@ export function AssetTickerTag({
         className={`${baseClass} ${styleClass} cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400`}
         title={matched ? `${symbol} อยู่ในพอร์ตโฟลิโอของคุณ` : `ดูข้อมูล ${symbol}`}
       >
-        {symbol}
+        <span>{symbol}</span>
       </button>
     );
   }
@@ -123,10 +133,202 @@ export function SentimentIndicator({ sentiment }: { sentiment: Sentiment }) {
   );
 }
 
-export function PortfolioMatchBadge() {
+export function PortfolioMatchBadge({
+  directCount,
+  indirectCount,
+}: {
+  directCount?: number;
+  indirectCount?: number;
+}) {
+  const hasDirect = (directCount ?? 1) > 0;
+  const hasIndirect = (indirectCount ?? 0) > 0;
+
+  if (hasDirect && hasIndirect) {
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-300 bg-amber-500/15 border border-amber-500/40 px-2 py-0.5 rounded whitespace-nowrap shrink-0">
+        กระทบพอร์ต (ทางตรง {directCount} · ทางอ้อม {indirectCount})
+      </span>
+    );
+  }
+
+  if (!hasDirect && hasIndirect) {
+    return (
+      <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-sky-300 bg-sky-500/15 border border-sky-500/40 px-2 py-0.5 rounded whitespace-nowrap shrink-0">
+        กระทบทางอ้อม ({indirectCount})
+      </span>
+    );
+  }
+
   return (
     <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-300 bg-amber-500/15 border border-amber-500/40 px-2 py-0.5 rounded whitespace-nowrap shrink-0">
-      กระทบพอร์ต
+      กระทบพอร์ต{directCount ? ` (${directCount})` : ''}
     </span>
   );
 }
+
+const SEVERITY_LABEL_TH = {
+  high: { text: 'ผลกระทบมาก', cls: 'text-rose-400' },
+  medium: { text: 'ปานกลาง', cls: 'text-amber-300' },
+  low: { text: 'น้อย', cls: 'text-slate-400' },
+} as const;
+
+export function PortfolioImpactMatrix({
+  impacts,
+  compact = false,
+  onTickerClick,
+}: {
+  impacts: PortfolioImpactDetail[];
+  compact?: boolean;
+  onTickerClick?: (symbol: string) => void;
+}) {
+  if (impacts.length === 0) return null;
+
+  const shown = compact ? impacts.slice(0, 3) : impacts;
+
+  return (
+    <div className="mt-2.5 pt-2.5 border-t border-[#1E2634]/80 space-y-1.5">
+      {shown.map((imp) => {
+        const sev = SEVERITY_LABEL_TH[imp.severity];
+        return (
+          <div
+            key={`${imp.symbol}-${imp.relation}`}
+            className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs leading-relaxed"
+          >
+            <AssetTickerTag
+              symbol={imp.symbol}
+              matched
+              relation={imp.relation}
+              onClick={onTickerClick ? () => onTickerClick(imp.symbol) : undefined}
+            />
+            <span
+              className={`text-[11px] font-medium whitespace-nowrap ${
+                imp.relation === 'direct' ? 'text-amber-300' : 'text-sky-300'
+              }`}
+            >
+              {imp.relation === 'direct' ? 'ทางตรง' : 'ทางอ้อม'}
+            </span>
+            <span className="text-slate-600" aria-hidden="true">·</span>
+            <span className={`text-[11px] font-semibold whitespace-nowrap ${sev.cls}`}>
+              {sev.text}
+            </span>
+            <span className="text-slate-600" aria-hidden="true">—</span>
+            <span className="text-slate-300">{imp.reasonTh}</span>
+          </div>
+        );
+      })}
+      {compact && impacts.length > shown.length && (
+        <div className="text-[11px] text-slate-400">
+          และอีก {impacts.length - shown.length} สินทรัพย์ในพอร์ตที่เชื่อมโยง
+        </div>
+      )}
+    </div>
+  );
+}
+
+const DIRECTION_STYLE: Record<
+  AssetDirection,
+  { dot: string; label: string; chipCls: string }
+> = {
+  bullish: {
+    dot: 'bg-emerald-400',
+    label: 'ขึ้น',
+    chipCls: 'bg-emerald-500/12 border-emerald-500/40 text-emerald-200',
+  },
+  bearish: {
+    dot: 'bg-rose-400',
+    label: 'ลง',
+    chipCls: 'bg-rose-500/12 border-rose-500/40 text-rose-200',
+  },
+  neutral: {
+    dot: 'bg-slate-400',
+    label: 'คงที่',
+    chipCls: 'bg-slate-700/30 border-slate-600/50 text-slate-200',
+  },
+};
+
+export function AssetDirectionChip({
+  forecast,
+  onClick,
+}: {
+  forecast: AssetDirectionForecast;
+  onClick?: () => void;
+}) {
+  const cfg = DIRECTION_STYLE[forecast.direction];
+  const heldRing = forecast.isPortfolioHeld ? 'ring-1 ring-amber-400/60' : '';
+
+  const content = (
+    <>
+      <span className="font-mono font-semibold">{forecast.symbol}</span>
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cfg.dot}`} aria-hidden="true" />
+      <span className="font-medium">{cfg.label}</span>
+    </>
+  );
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClick();
+        }}
+        title={`${forecast.symbol}: คาดการณ์${cfg.label} — ${forecast.reasonTh}`}
+        className={`inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${cfg.chipCls} ${heldRing}`}
+      >
+        {content}
+      </button>
+    );
+  }
+
+  return (
+    <span
+      title={`${forecast.symbol}: คาดการณ์${cfg.label} — ${forecast.reasonTh}`}
+      className={`inline-flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded border whitespace-nowrap shrink-0 ${cfg.chipCls} ${heldRing}`}
+    >
+      {content}
+    </span>
+  );
+}
+
+export function AssetDirectionForecastList({
+  forecasts,
+  isReleased,
+  compact = false,
+  onTickerClick,
+}: {
+  forecasts: AssetDirectionForecast[];
+  isReleased: boolean;
+  compact?: boolean;
+  onTickerClick?: (symbol: string) => void;
+}) {
+  if (forecasts.length === 0) return null;
+
+  const shown = compact ? forecasts.slice(0, 4) : forecasts.slice(0, 6);
+  const lead = shown[0];
+
+  return (
+    <div className="mt-2 space-y-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {shown.map((fc) => (
+          <AssetDirectionChip
+            key={fc.symbol}
+            forecast={fc}
+            onClick={onTickerClick ? () => onTickerClick(fc.symbol) : undefined}
+          />
+        ))}
+      </div>
+      {!compact && lead && (
+        <div className="text-[11px] text-slate-400 leading-relaxed">
+          <span className="text-slate-300 font-medium">
+            {isReleased ? 'ผลเทียบคาดการณ์:' : 'แนวโน้มคาดการณ์:'}
+          </span>{' '}
+          {lead.reasonTh}
+          {!isReleased && lead.scenarioNoteTh && (
+            <span className="text-amber-300/90 ml-1">({lead.scenarioNoteTh})</span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
