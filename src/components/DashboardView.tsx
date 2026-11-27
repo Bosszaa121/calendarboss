@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowRight,
   BarChart3,
@@ -8,6 +9,7 @@ import {
   Coins,
   Newspaper,
   Plus,
+  RefreshCw,
   ShieldAlert,
 } from 'lucide-react';
 import {
@@ -38,6 +40,12 @@ import {
   SentimentIndicator,
 } from './ImpactRating';
 import { FearGreedGauge } from './FearGreedGauge';
+import {
+  CalendarRowsSkeleton,
+  FearGreedSkeleton,
+  LiveSearchingBanner,
+  NewsCardsSkeleton,
+} from './LoadingSkeletons';
 
 interface DashboardViewProps {
   portfolio: PortfolioAsset[];
@@ -47,7 +55,10 @@ interface DashboardViewProps {
   earningsRecords: EarningsRecord[];
   dividendRecords: DividendXDRecord[];
   alerts: AppAlert[];
-  fearGreed: FearGreedData;
+  fearGreed: FearGreedData | null;
+  isLoadingMarket: boolean;
+  marketError: string | null;
+  onRetryMarket: () => void;
   onNavigate: (
     tab: NavTab,
     options?: { onlyPortfolio?: boolean; searchQuery?: string; newsSubTab?: NewsSubTab }
@@ -63,6 +74,9 @@ export function DashboardView({
   dividendRecords,
   alerts,
   fearGreed,
+  isLoadingMarket,
+  marketError,
+  onRetryMarket,
   onNavigate,
 }: DashboardViewProps) {
   const analyzed = useMemo(() => {
@@ -133,6 +147,7 @@ export function DashboardView({
     const upcomingXDCount = dividendRecords.filter(
       (d) =>
         d.applicable &&
+        d.xdStatus === 'announced' &&
         typeof d.daysUntilXD === 'number' &&
         d.daysUntilXD >= 0 &&
         d.daysUntilXD <= 7
@@ -205,7 +220,12 @@ export function DashboardView({
   const soonXdAlerts = useMemo(
     () =>
       dividendRecords.filter(
-        (d) => d.applicable && typeof d.daysUntilXD === 'number' && d.daysUntilXD >= 0 && d.daysUntilXD <= 7
+        (d) =>
+          d.applicable &&
+          d.xdStatus === 'announced' &&
+          typeof d.daysUntilXD === 'number' &&
+          d.daysUntilXD >= 0 &&
+          d.daysUntilXD <= 7
       ),
     [dividendRecords]
   );
@@ -214,6 +234,10 @@ export function DashboardView({
 
   return (
     <div className="space-y-6">
+      {/* Live Searching Banner */}
+      {isLoadingMarket && (
+        <LiveSearchingBanner message="กำลังค้นหาข้อมูลปฏิทินเศรษฐกิจ ข่าวโลก และ Fear & Greed Index จริงล่าสุดจาก Google Search..." />
+      )}
       {/* Risk Warning Alert Strip (shown immediately if high risk detected) */}
       {riskAlerts.length > 0 && (
         <section
@@ -453,6 +477,22 @@ export function DashboardView({
               </button>
             </div>
 
+            {isLoadingMarket && calendarEvents.length === 0 ? (
+              <CalendarRowsSkeleton rows={5} />
+            ) : !isLoadingMarket && marketError && calendarEvents.length === 0 ? (
+              <div className="py-10 px-5 text-center space-y-3">
+                <AlertCircle className="w-5 h-5 text-rose-400 mx-auto" />
+                <p className="text-xs text-rose-200 max-w-md mx-auto">{marketError}</p>
+                <button
+                  type="button"
+                  onClick={onRetryMarket}
+                  className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-amber-500 text-slate-950 hover:bg-amber-400 inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>ลองค้นหาใหม่</span>
+                </button>
+              </div>
+            ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
                 <thead>
@@ -468,7 +508,7 @@ export function DashboardView({
                   {featuredTodayEvents.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="py-8 text-center text-sm text-slate-400">
-                        ไม่มีกำหนดการประกาศตัวเลขสำคัญสำหรับวันนี้
+                        ไม่มีกำหนดการประกาศตัวเลขสำคัญสำหรับวันนี้ (กดดูปฏิทิน 14 วันเพื่อดูรายการใกล้เคียง)
                       </td>
                     </tr>
                   ) : (
@@ -562,6 +602,7 @@ export function DashboardView({
                 </tbody>
               </table>
             </div>
+            )}
           </section>
 
           {/* Latest Global News Preview */}
@@ -594,6 +635,24 @@ export function DashboardView({
               </div>
             </div>
 
+            {isLoadingMarket && newsItems.length === 0 ? (
+              <div className="p-4">
+                <NewsCardsSkeleton cards={2} />
+              </div>
+            ) : featuredNews.length === 0 ? (
+              <div className="py-10 px-5 text-center space-y-2.5">
+                <p className="text-xs text-slate-400">
+                  {marketError || 'ยังไม่มีข่าวสดในขณะนี้ กดอัปเดตเพื่อค้นหาข่าวจริงล่าสุด'}
+                </p>
+                <button
+                  type="button"
+                  onClick={onRetryMarket}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-medium bg-[#161E2B] border border-[#283549] text-slate-200 hover:border-amber-500/50 cursor-pointer"
+                >
+                  ค้นหาข่าวล่าสุด
+                </button>
+              </div>
+            ) : (
             <div className="divide-y divide-[#1A2230]">
               {featuredNews.map((item) => {
                 const impacts = analyzed.newsImpacts.get(item.id) ?? [];
@@ -655,12 +714,34 @@ export function DashboardView({
                 );
               })}
             </div>
+            )}
           </section>
         </div>
 
         {/* Right 4 Columns: Fear & Greed + XD Countdown + Portfolio Watchlist */}
         <div className="xl:col-span-4 space-y-6">
-          <FearGreedGauge data={fearGreed} />
+          {fearGreed ? (
+            <FearGreedGauge data={fearGreed} />
+          ) : isLoadingMarket ? (
+            <FearGreedSkeleton />
+          ) : (
+            <section className="bg-[#10151E] border border-[#1E2634] rounded-xl p-5 text-center space-y-3">
+              <h2 className="text-base font-semibold text-slate-100">
+                ดัชนีความกลัวและความโลภ (Fear &amp; Greed)
+              </h2>
+              <p className="text-xs text-slate-400">
+                {marketError || 'ยังไม่ได้ดึงค่า CNN Fear & Greed Index ล่าสุดจาก Google Search'}
+              </p>
+              <button
+                type="button"
+                onClick={onRetryMarket}
+                className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-amber-500 text-slate-950 hover:bg-amber-400 inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>ดึงค่าจริงล่าสุด</span>
+              </button>
+            </section>
+          )}
 
           {/* Upcoming XD Quick Widget */}
           {soonXdAlerts.length > 0 && (

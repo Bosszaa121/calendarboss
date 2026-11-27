@@ -13,27 +13,19 @@ import {
   X,
 } from 'lucide-react';
 import {
-  buildBaselineEarningsXD,
-  buildInitialCalendarEvents,
-  buildInitialNewsItems,
-  buildInitialSocialInsights,
-  INITIAL_FEAR_GREED,
-} from './data/mockMarketData';
-import {
   AssetCategory,
   CalendarEvent,
+  ChartTargetAsset,
   DividendXDRecord,
   EarningsRecord,
-  EarningsXDResponse,
   FearGreedData,
+  LiveAssetQuote,
   LocalUserAccount,
   NavTab,
   NewsItem,
   NewsSubTab,
   PortfolioAsset,
   SocialInsightItem,
-  SocialInsightsResponse,
-  SyncResponse,
   SyncSource,
 } from './types';
 import {
@@ -58,6 +50,16 @@ import {
   requestChromeNotificationPermission,
   sendTestChromeNotification,
 } from './utils/alertEngine';
+import {
+  BATCHED_CACHE_TTL_MS,
+  buildPortfolioSignature,
+  getLocalTodayIso,
+  isCacheFresh,
+  loadCachedBatchedData,
+  saveCachedBatchedData,
+} from './utils/liveDataCache';
+import { markServedFromCache } from './utils/quotaTracker';
+import { syncBatchedInvestCalLive } from './services/geminiService';
 import { DashboardView } from './components/DashboardView';
 import { PortfolioView } from './components/PortfolioView';
 import { CalendarView } from './components/CalendarView';
@@ -67,6 +69,12 @@ import { AuthModal } from './components/AuthModal';
 import { NotificationCenter } from './components/NotificationCenter';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import {
+  HeaderQuotaGauge,
+  SidebarQuotaCard,
+  useQuotaSnapshot,
+} from './components/ApiQuotaGauge';
+import { TechnicalChartModal } from './components/TechnicalChartModal';
 
 function InvestCalLogoMark() {
   return (
@@ -133,12 +141,21 @@ function loadReadAlertsForAccount(accountId: string): Set<string> {
   }
 }
 
+function formatThaiTimeNow(): string {
+  return new Date().toLocaleTimeString('th-TH', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
   const [newsSubTab, setNewsSubTab] = useState<NewsSubTab>('global');
   const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [chartTargetAsset, setChartTargetAsset] = useState<ChartTargetAsset | null>(null);
+  const quota = useQuotaSnapshot();
 
-  // Pure Local Multi-Account State (Zero Firebase, 100% isolated portfolios starting empty)
+  // Pure Local Multi-Account State (100% isolated portfolios starting empty)
   const [accounts, setAccounts] = useState<LocalUserAccount[]>(() => loadLocalAccounts());
   const [activeAccountId, setActiveAccountId] = useState<string>(() =>
     loadActiveAccountId(loadLocalAccounts())
@@ -150,28 +167,46 @@ export default function App() {
     loadReadAlertsForAccount(loadActiveAccountId(loadLocalAccounts()))
   );
 
-  // Market data state
-  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>(() =>
-    buildInitialCalendarEvents()
+  const portfolioSignature = useMemo(
+    () => buildPortfolioSignature(portfolio.map((p) => p.symbol)),
+    [portfolio]
   );
-  const [newsItems, setNewsItems] = useState<NewsItem[]>(() => buildInitialNewsItems());
-  const [fearGreed, setFearGreed] = useState<FearGreedData>(INITIAL_FEAR_GREED);
-  const [syncSources, setSyncSources] = useState<SyncSource[]>([]);
 
-  // Earnings & XD Tracker state (live synced overrides baseline)
-  const [liveEarnings, setLiveEarnings] = useState<EarningsRecord[] | null>(null);
-  const [liveDividends, setLiveDividends] = useState<DividendXDRecord[] | null>(null);
-  const [earningsSources, setEarningsSources] = useState<SyncSource[]>([]);
-  const [isSyncingEarnings, setIsSyncingEarnings] = useState(false);
-  const [lastEarningsSyncAt, setLastEarningsSyncAt] = useState<string | null>(null);
+  // Hydrate strictly from 6-hour unified batched cache (Zero Mock Data)
+  const initialBundle = useMemo(() => {
+    const acct = loadActiveAccountId(loadLocalAccounts());
+    const initPort = loadPortfolioForAccount(acct);
+    const initSig = buildPortfolioSignature(initPort.map((p) => p.symbol));
+    return loadCachedBatchedData(acct, initSig);
+  }, []);
 
-  // Social Media Deep Insights state
-  const [socialInsights, setSocialInsights] = useState<SocialInsightItem[]>(() =>
-    buildInitialSocialInsights()
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEvent[]>(
+    () => initialBundle?.calendarEvents ?? []
   );
-  const [socialSources, setSocialSources] = useState<SyncSource[]>([]);
-  const [isSyncingSocial, setIsSyncingSocial] = useState(false);
-  const [lastSocialSyncAt, setLastSocialSyncAt] = useState<string | null>(null);
+  const [newsItems, setNewsItems] = useState<NewsItem[]>(() => initialBundle?.newsItems ?? []);
+  const [fearGreed, setFearGreed] = useState<FearGreedData | null>(
+    () => initialBundle?.fearGreed ?? null
+  );
+  const [earningsRecords, setEarningsRecords] = useState<EarningsRecord[]>(
+    () => initialBundle?.earnings ?? []
+  );
+  const [dividendRecords, setDividendRecords] = useState<DividendXDRecord[]>(
+    () => initialBundle?.dividends ?? []
+  );
+  const [socialInsights, setSocialInsights] = useState<SocialInsightItem[]>(
+    () => initialBundle?.socialInsights ?? []
+  );
+  const [liveQuotes, setLiveQuotes] = useState<Record<string, LiveAssetQuote>>(
+    () => initialBundle?.quotes ?? {}
+  );
+  const [syncSources, setSyncSources] = useState<SyncSource[]>(
+    () => initialBundle?.sources ?? []
+  );
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(
+    () => initialBundle?.syncedTimeLabel ?? null
+  );
 
   // Shared cross-tab filter state
   const [calendarOnlyPortfolio, setCalendarOnlyPortfolio] = useState(false);
@@ -183,24 +218,38 @@ export default function App() {
     useState<BrowserNotificationPermission>(() => getBrowserNotificationPermission());
   const pushedChromeAlertIdsRef = useRef<Set<string>>(new Set());
 
-  // Global Sync & Notice state
-  const [isSyncing, setIsSyncing] = useState(false);
-  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  // Notice banner state
   const [notice, setNotice] = useState<{
     type: 'success' | 'error';
     message: string;
   } | null>(null);
 
-  // Auto-sync first time when portfolio has assets (user preference)
-  const autoSyncedSignatureRef = useRef<string | null>(null);
+  // Request sequence guard to prevent race conditions during rapid portfolio edits
+  const batchedReqIdRef = useRef(0);
+  const portfolioRef = useRef<PortfolioAsset[]>(portfolio);
+  portfolioRef.current = portfolio;
 
-  // Reload portfolio & read alerts whenever activeAccountId switches
+  const activeAccountIdRef = useRef<string>(activeAccountId);
+  activeAccountIdRef.current = activeAccountId;
+
+  // Reload isolated portfolio & 6-hour batched cache whenever activeAccountId switches
   useEffect(() => {
-    setPortfolio(loadPortfolioForAccount(activeAccountId));
+    const nextPortfolio = loadPortfolioForAccount(activeAccountId);
+    const nextSig = buildPortfolioSignature(nextPortfolio.map((p) => p.symbol));
+    setPortfolio(nextPortfolio);
     setReadAlertIds(loadReadAlertsForAccount(activeAccountId));
-    setLiveEarnings(null);
-    setLiveDividends(null);
-    autoSyncedSignatureRef.current = null;
+
+    const cached = loadCachedBatchedData(activeAccountId, nextSig);
+    setCalendarEvents(cached?.calendarEvents ?? []);
+    setNewsItems(cached?.newsItems ?? []);
+    setFearGreed(cached?.fearGreed ?? null);
+    setEarningsRecords(cached?.earnings ?? []);
+    setDividendRecords(cached?.dividends ?? []);
+    setSocialInsights(cached?.socialInsights ?? []);
+    setLiveQuotes(cached?.quotes ?? {});
+    setSyncSources(cached?.sources ?? []);
+    setLastSyncedAt(cached?.syncedTimeLabel ?? null);
+    setSyncError(null);
   }, [activeAccountId]);
 
   const activeAccount = useMemo(
@@ -214,15 +263,7 @@ export default function App() {
 
   const portfolioMap = useMemo(() => buildPortfolioSymbolMap(portfolio), [portfolio]);
 
-  // Baseline Earnings & XD tailored strictly to current portfolio; replaced when live-synced
-  const baselineEarningsXD = useMemo(
-    () => buildBaselineEarningsXD(portfolio),
-    [portfolio]
-  );
-  const earningsRecords = liveEarnings ?? baselineEarningsXD.earnings;
-  const dividendRecords = liveDividends ?? baselineEarningsXD.dividends;
-
-  // Compute all 4 categories of investor alerts (Macro/News, Earnings 1-3d, XD 1-7d, Risk Warning)
+  // Compute all 4 categories of investor alerts strictly from verified live data
   const investorAlerts = useMemo(
     () =>
       buildInvestorAlerts({
@@ -261,7 +302,6 @@ export default function App() {
 
     if (candidates.length === 0) return;
 
-    // Dispatch up to 2 highest-priority Chrome alerts to stay helpful without spamming
     for (const alert of candidates.slice(0, 2)) {
       pushedChromeAlertIdsRef.current.add(alert.id);
       void fireChromeNotification({
@@ -325,12 +365,143 @@ export default function App() {
     const xSoon = dividendRecords.filter(
       (d) =>
         d.applicable &&
+        d.xdStatus === 'announced' &&
         typeof d.daysUntilXD === 'number' &&
         d.daysUntilXD >= 0 &&
         d.daysUntilXD <= 7
     ).length;
     return eSoon + xSoon;
   }, [earningsRecords, dividendRecords]);
+
+  // =========================================================================
+  // SINGLE BATCHED SYNC: Free Google News RSS + Yahoo Finance + 1 Gemini Call
+  // Cached in LocalStorage for 6 hours (BATCHED_CACHE_TTL_MS)
+  // =========================================================================
+  const syncBatchedAllLive = useCallback(
+    async (targetPortfolio: PortfolioAsset[], targetAccountId: string, silent = false) => {
+      const reqId = ++batchedReqIdRef.current;
+      const targetSig = buildPortfolioSignature(targetPortfolio.map((p) => p.symbol));
+      setIsSyncing(true);
+      setSyncError(null);
+      if (!silent) setNotice(null);
+
+      try {
+        const data = await syncBatchedInvestCalLive(targetPortfolio, { force: !silent });
+        if (reqId !== batchedReqIdRef.current) return;
+
+        const nowTime = formatThaiTimeNow();
+
+        let nextFearGreed: FearGreedData | null = null;
+        if (data.fearGreed && typeof data.fearGreed.value === 'number') {
+          const val = data.fearGreed.value;
+          nextFearGreed = {
+            value: val,
+            labelTh: data.fearGreed.labelTh || getFearGreedLabelTh(val),
+            previousClose: data.fearGreed.previousClose ?? val,
+            oneWeekAgo: data.fearGreed.oneWeekAgo ?? val,
+            oneMonthAgo: data.fearGreed.oneMonthAgo ?? val,
+            marketNote:
+              data.fearGreed.marketNote || 'วิเคราะห์บรรยากาศตลาดล่าสุดจากข่าว RSS และ Yahoo Finance',
+            updatedLabel: data.fearGreed.updatedLabel || `อัปเดตสด ${nowTime} น.`,
+          };
+        }
+
+        setCalendarEvents(data.calendarEvents);
+        setNewsItems(data.newsItems);
+        setFearGreed((prev) => nextFearGreed ?? prev);
+        setEarningsRecords(data.earnings);
+        setDividendRecords(data.dividends);
+        setSocialInsights(data.socialInsights);
+        setLiveQuotes(data.quotes || {});
+        setSyncSources(data.sources);
+        setLastSyncedAt(nowTime);
+
+        saveCachedBatchedData(targetAccountId, {
+          portfolioSignature: targetSig,
+          calendarEvents: data.calendarEvents,
+          newsItems: data.newsItems,
+          fearGreed: nextFearGreed,
+          earnings: data.earnings,
+          dividends: data.dividends,
+          socialInsights: data.socialInsights,
+          quotes: data.quotes || {},
+          sources: data.sources,
+          syncedAt: data.syncedAt,
+          syncedDateIso: getLocalTodayIso(),
+          syncedTimeLabel: nowTime,
+        });
+
+        if (data.aiWarning) {
+          setSyncError(data.aiWarning);
+          if (!silent) {
+            setNotice({
+              type: 'error',
+              message: `${data.aiWarning} (ดึงข่าวสด ${data.newsItems.length} รายการ และราคาหุ้น ${Object.keys(data.quotes || {}).length} ตัวสำเร็จ)`,
+            });
+          }
+        } else if (!silent) {
+          setNotice({
+            type: 'success',
+            message: `อัปเดตข้อมูลล่าสุดสำเร็จ เวลา ${nowTime} น. — ปฏิทิน ${data.calendarEvents.length}, ข่าว ${data.newsItems.length}, โซเชียล ${data.socialInsights.length} และราคา/ปันผล Yahoo Finance (แคช 6 ชม.)`,
+          });
+        }
+      } catch (err) {
+        if (reqId !== batchedReqIdRef.current) return;
+        const msg =
+          err instanceof Error
+            ? err.message
+            : 'ไม่สามารถอัปเดตข้อมูลตลาดสดได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง';
+        setSyncError(msg);
+        if (!silent) {
+          setNotice({ type: 'error', message: msg });
+        }
+      } finally {
+        if (reqId === batchedReqIdRef.current) {
+          setIsSyncing(false);
+        }
+      }
+    },
+    []
+  );
+
+  const handleLiveSyncAll = useCallback(
+    async (silent = false) => {
+      await syncBatchedAllLive(portfolioRef.current, activeAccountIdRef.current, silent);
+    },
+    [syncBatchedAllLive]
+  );
+
+  // -------------------------------------------------------------------------
+  // Automatic 6-Hour Cached Batched Sync Lifecycle (Zero Redundant Requests):
+  // Fires 1 single batched request ONLY when no fresh (< 6 hours) cache from
+  // today exists for the active account + portfolio signature.
+  // -------------------------------------------------------------------------
+  const lastAutoSyncKeyRef = useRef<string>('');
+  useEffect(() => {
+    const syncKey = `${activeAccountId}::${portfolioSignature}`;
+    if (lastAutoSyncKeyRef.current === syncKey) return;
+
+    const cached = loadCachedBatchedData(activeAccountId, portfolioSignature);
+    const hasFreshCache =
+      cached &&
+      (cached.calendarEvents.length > 0 || cached.newsItems.length > 0) &&
+      isCacheFresh(cached.syncedAt, cached.syncedDateIso, BATCHED_CACHE_TTL_MS);
+
+    if (hasFreshCache) {
+      lastAutoSyncKeyRef.current = syncKey;
+      markServedFromCache();
+      return;
+    }
+
+    // Coalesce rapid multi-asset additions into 1 single batched call
+    const delayMs = lastAutoSyncKeyRef.current === '' ? 150 : 1200;
+    const timer = window.setTimeout(() => {
+      lastAutoSyncKeyRef.current = syncKey;
+      void syncBatchedAllLive(portfolioRef.current, activeAccountId, true);
+    }, delayMs);
+
+    return () => window.clearTimeout(timer);
+  }, [activeAccountId, portfolioSignature, syncBatchedAllLive]);
 
   function handleAddAsset(assetInput: Omit<PortfolioAsset, 'id' | 'addedAt'>) {
     setPortfolio((prev) => {
@@ -348,9 +519,7 @@ export default function App() {
       savePortfolioForAccount(activeAccountId, next);
       return next;
     });
-    // Reset live earnings cache so baseline immediately reflects newly added asset until next sync
-    setLiveEarnings(null);
-    setLiveDividends(null);
+    setSyncError(null);
   }
 
   function handleRemoveAsset(id: string) {
@@ -359,8 +528,20 @@ export default function App() {
       savePortfolioForAccount(activeAccountId, next);
       return next;
     });
-    setLiveEarnings(null);
-    setLiveDividends(null);
+    setSyncError(null);
+  }
+
+  function handleUpdateAssetCost(id: string, averageCost?: number, quantity?: number) {
+    setPortfolio((prev) => {
+      const next = prev.map((item) =>
+        item.id === id ? { ...item, averageCost, quantity } : item
+      );
+      savePortfolioForAccount(activeAccountId, next);
+      return next;
+    });
+    setChartTargetAsset((prev) =>
+      prev && prev.portfolioId === id ? { ...prev, averageCost, quantity } : prev
+    );
   }
 
   function handleAuthChange(
@@ -370,6 +551,7 @@ export default function App() {
   ) {
     setAccounts(nextAccounts);
     setActiveAccountId(nextActiveId);
+    lastAutoSyncKeyRef.current = '';
     if (message) {
       setNotice({ type: 'success', message });
     }
@@ -378,7 +560,7 @@ export default function App() {
   function handleExportJson() {
     const payload = {
       app: 'InvestCal',
-      version: 3,
+      version: 5,
       exportedAt: new Date().toISOString(),
       account: activeAccount ? `@${activeAccount.username}` : 'guest',
       portfolio,
@@ -462,8 +644,22 @@ export default function App() {
                 ? item.themes.filter((t: unknown): t is string => typeof t === 'string').slice(0, 8)
                 : [],
               topHoldings: Array.isArray(item.topHoldings)
-                ? item.topHoldings.filter((t: unknown): t is string => typeof t === 'string').slice(0, 5)
+                ? item.topHoldings
+                    .filter((t: unknown): t is string => typeof t === 'string')
+                    .slice(0, 5)
                 : undefined,
+              averageCost:
+                typeof item.averageCost === 'number' &&
+                Number.isFinite(item.averageCost) &&
+                item.averageCost > 0
+                  ? item.averageCost
+                  : undefined,
+              quantity:
+                typeof item.quantity === 'number' &&
+                Number.isFinite(item.quantity) &&
+                item.quantity > 0
+                  ? item.quantity
+                  : undefined,
             };
           })
           .filter((a: Omit<PortfolioAsset, 'id' | 'addedAt'>) => a.symbol.length > 0);
@@ -488,11 +684,9 @@ export default function App() {
           return merged;
         });
 
-        setLiveEarnings(null);
-        setLiveDividends(null);
         setNotice({
           type: 'success',
-          message: `นำเข้าสินทรัพย์จากไฟล์ JSON จำนวน ${sanitized.length} รายการเรียบร้อยแล้ว`,
+          message: `นำเข้าสินทรัพย์จากไฟล์ JSON จำนวน ${sanitized.length} รายการเรียบร้อยแล้ว — กำลังอัปเดตราคา ปันผล และข่าวล่าสุดในคำขอเดียว`,
         });
       } catch (err) {
         setNotice({
@@ -581,232 +775,6 @@ export default function App() {
     });
   }
 
-  const syncEarningsXDLive = useCallback(
-    async (silent = false) => {
-      if (portfolio.length === 0 || isSyncingEarnings) return;
-      setIsSyncingEarnings(true);
-      try {
-        const res = await fetch('/api/earnings-xd', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            portfolio: portfolio.map((p) => ({
-              symbol: p.symbol,
-              name: p.name,
-              category: p.category,
-              sector: p.sector,
-              topHoldings: p.topHoldings,
-            })),
-          }),
-        });
-        const contentType = res.headers.get('content-type') || '';
-        if (!contentType.includes('application/json')) {
-          throw new Error('ไม่สามารถเชื่อมต่อ API งบการเงินได้');
-        }
-        const payload = await res.json();
-        if (!res.ok) throw new Error(payload?.error || 'Sync earnings failed');
-
-        const data = payload as EarningsXDResponse;
-        if (Array.isArray(data.earnings) && data.earnings.length > 0) {
-          setLiveEarnings(data.earnings);
-        }
-        if (Array.isArray(data.dividends) && data.dividends.length > 0) {
-          setLiveDividends(data.dividends);
-        }
-        if (Array.isArray(data.sources)) {
-          setEarningsSources(data.sources);
-        }
-        const nowTime = new Date().toLocaleTimeString('th-TH', {
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-        setLastEarningsSyncAt(nowTime);
-        if (!silent) {
-          setNotice({
-            type: 'success',
-            message: `อัปเดตข้อมูลงบการเงิน (${data.earnings.length}) และวัน XD (${data.dividends.length}) สดผ่าน Google Search เวลา ${nowTime} น.`,
-          });
-        }
-      } catch (err) {
-        if (!silent) {
-          setNotice({
-            type: 'error',
-            message:
-              err instanceof Error ? err.message : 'ไม่สามารถอัปเดตงบและวัน XD ได้',
-          });
-        }
-      } finally {
-        setIsSyncingEarnings(false);
-      }
-    },
-    [portfolio, isSyncingEarnings]
-  );
-
-  const syncSocialInsightsLive = useCallback(
-    async (silent = false) => {
-      if (isSyncingSocial) return;
-      setIsSyncingSocial(true);
-      try {
-        const res = await fetch('/api/social-insights', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            portfolio: portfolio.map((p) => ({
-              symbol: p.symbol,
-              name: p.name,
-              category: p.category,
-              sector: p.sector,
-            })),
-          }),
-        });
-        const contentType = res.headers.get('content-type') || '';
-        if (!contentType.includes('application/json')) {
-          throw new Error('ไม่สามารถเชื่อมต่อ API ฟีดโซเชียลได้');
-        }
-        const payload = await res.json();
-        if (!res.ok) throw new Error(payload?.error || 'Sync social failed');
-
-        const data = payload as SocialInsightsResponse;
-        if (Array.isArray(data.items) && data.items.length > 0) {
-          setSocialInsights(data.items);
-        }
-        if (Array.isArray(data.sources)) {
-          setSocialSources(data.sources);
-        }
-        const nowTime = new Date().toLocaleTimeString('th-TH', {
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-        setLastSocialSyncAt(nowTime);
-        if (!silent) {
-          setNotice({
-            type: 'success',
-            message: `อัปเดตฟีดโซเชียล X.com / Facebook / YouTube สดจำนวน ${data.items.length} ประเด็น เวลา ${nowTime} น.`,
-          });
-        }
-      } catch (err) {
-        if (!silent) {
-          setNotice({
-            type: 'error',
-            message:
-              err instanceof Error ? err.message : 'ไม่สามารถอัปเดตฟีดโซเชียลได้',
-          });
-        }
-      } finally {
-        setIsSyncingSocial(false);
-      }
-    },
-    [portfolio, isSyncingSocial]
-  );
-
-  const handleLiveSyncAll = useCallback(
-    async (silent = false) => {
-      if (isSyncing) return;
-      setIsSyncing(true);
-      if (!silent) setNotice(null);
-
-      try {
-        const portfolioPayload = portfolio.map((p) => ({
-          symbol: p.symbol,
-          name: p.name,
-          category: p.category,
-          sector: p.sector,
-          themes: p.themes,
-          topHoldings: p.topHoldings,
-        }));
-
-        const res = await fetch('/api/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ portfolio: portfolioPayload }),
-        });
-
-        const contentType = res.headers.get('content-type') || '';
-        if (!contentType.includes('application/json')) {
-          throw new Error('เซิร์ฟเวอร์ซิงค์ข้อมูลสดไม่พร้อมใช้งาน');
-        }
-
-        const payload = await res.json();
-        if (!res.ok) {
-          throw new Error(payload?.error || `Sync failed (${res.status})`);
-        }
-
-        const data = payload as SyncResponse;
-
-        if (Array.isArray(data.calendarEvents) && data.calendarEvents.length > 0) {
-          setCalendarEvents((prev) => {
-            const nonLive = prev.filter((e) => !e.isLiveSynced);
-            return [...data.calendarEvents, ...nonLive];
-          });
-        }
-
-        if (Array.isArray(data.newsItems) && data.newsItems.length > 0) {
-          setNewsItems((prev) => {
-            const nonLive = prev.filter((n) => !n.isLiveSynced);
-            return [...data.newsItems, ...nonLive];
-          });
-        }
-
-        if (data.fearGreed && typeof data.fearGreed.value === 'number') {
-          const val = data.fearGreed.value;
-          setFearGreed((prev) => ({
-            ...prev,
-            value: val,
-            labelTh: getFearGreedLabelTh(val),
-            previousClose: data.fearGreed?.previousClose ?? prev.previousClose,
-            oneWeekAgo: data.fearGreed?.oneWeekAgo ?? prev.oneWeekAgo,
-            oneMonthAgo: data.fearGreed?.oneMonthAgo ?? prev.oneMonthAgo,
-            marketNote: data.fearGreed?.marketNote ?? prev.marketNote,
-            updatedLabel: 'อัปเดตสดจาก Google Search',
-          }));
-        }
-
-        if (Array.isArray(data.sources)) {
-          setSyncSources(data.sources);
-        }
-
-        // Kick off Earnings/XD & Social Insights sync in background concurrently
-        if (portfolio.length > 0) {
-          void syncEarningsXDLive(true);
-        }
-        void syncSocialInsightsLive(true);
-
-        const nowTime = new Date().toLocaleTimeString('th-TH', {
-          hour: '2-digit',
-          minute: '2-digit',
-        });
-        setLastSyncedAt(nowTime);
-        if (!silent) {
-          setNotice({
-            type: 'success',
-            message: `อัปเดตข้อมูลสดด้วย Google Search สำเร็จ เวลา ${nowTime} น. — ปฏิทิน ${data.calendarEvents.length} รายการ และข่าว ${data.newsItems.length} รายการ`,
-          });
-        }
-      } catch (err) {
-        if (!silent) {
-          const msg =
-            err instanceof Error
-              ? err.message
-              : 'ไม่สามารถเชื่อมต่อระบบอัปเดตข้อมูลสดได้ในขณะนี้';
-          setNotice({ type: 'error', message: msg });
-        }
-      } finally {
-        setIsSyncing(false);
-      }
-    },
-    [isSyncing, portfolio, syncEarningsXDLive, syncSocialInsightsLive]
-  );
-
-  // Auto-sync once automatically when the user has assets in their portfolio
-  useEffect(() => {
-    if (portfolio.length === 0) return;
-    const sig = `${activeAccountId}:${portfolio.map((p) => p.symbol).sort().join(',')}`;
-    if (autoSyncedSignatureRef.current === null) {
-      autoSyncedSignatureRef.current = sig;
-      void handleLiveSyncAll(true);
-    }
-  }, [portfolio, activeAccountId, handleLiveSyncAll]);
-
   const currentNavMeta = NAV_ITEMS.find((n) => n.id === activeTab) ?? NAV_ITEMS[0];
 
   const todayFormattedTh = useMemo(() => {
@@ -883,8 +851,10 @@ export default function App() {
           })}
         </nav>
 
-        {/* Sidebar Account Profile, PWA Install & Sync Status */}
-        <div className="p-3.5 border-t border-[#1B2230] space-y-2.5">
+        {/* Sidebar Quota Gauge, Account Profile, PWA Install & Sync Status */}
+        <div className="p-3.5 border-t border-[#1B2230] space-y-2.5 overflow-y-auto">
+          <SidebarQuotaCard quota={quota} />
+
           <button
             type="button"
             onClick={() => setAuthModalOpen(true)}
@@ -917,9 +887,9 @@ export default function App() {
               </span>
             </div>
             <div className="flex items-center justify-between text-slate-500">
-              <span>ซิงค์ข้อมูลล่าสุด</span>
+              <span>อัปเดตล่าสุด (แคช 6 ชม.)</span>
               <span className="font-mono tabular-nums">
-                {lastSyncedAt ? `${lastSyncedAt} น.` : 'ข้อมูลพื้นฐาน'}
+                {isSyncing ? 'กำลังอัปเดต...' : lastSyncedAt ? `${lastSyncedAt} น.` : 'รออัปเดต'}
               </span>
             </div>
           </div>
@@ -951,8 +921,10 @@ export default function App() {
             </div>
           </div>
 
-          {/* Top-Right Controls: Alerts Bell + PWA Install + Local Account + Live Sync */}
+          {/* Top-Right Controls: Quota Gauge + Alerts Bell + PWA Install + Local Account + Live Sync */}
           <div className="flex items-center gap-2 shrink-0">
+            <HeaderQuotaGauge quota={quota} />
+
             <NotificationCenter
               alerts={investorAlerts}
               readAlertIds={readAlertIds}
@@ -993,16 +965,26 @@ export default function App() {
             <button
               type="button"
               onClick={() => void handleLiveSyncAll(false)}
-              disabled={isSyncing}
-              className="px-3 sm:px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 disabled:opacity-70 disabled:cursor-wait transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              disabled={isSyncing || quota.isCoolingDown}
+              className="px-3 sm:px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 disabled:opacity-65 disabled:cursor-not-allowed transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <RefreshCw
                 className={`w-3.5 h-3.5 shrink-0 ${isSyncing ? 'animate-spin' : ''}`}
               />
               <span className="hidden sm:inline">
-                {isSyncing ? 'กำลังอัปเดตสด...' : 'อัปเดตข้อมูลล่าสุด'}
+                {isSyncing
+                  ? 'กำลังอัปเดต...'
+                  : quota.isCoolingDown
+                  ? `พักโควตา (${quota.cooldownSecondsLeft}s)`
+                  : 'อัปเดตข้อมูลล่าสุด'}
               </span>
-              <span className="sm:hidden">{isSyncing ? 'ซิงค์...' : 'อัปเดต'}</span>
+              <span className="sm:hidden">
+                {isSyncing
+                  ? 'อัปเดต...'
+                  : quota.isCoolingDown
+                  ? `${quota.cooldownSecondsLeft}s`
+                  : 'อัปเดต'}
+              </span>
             </button>
           </div>
         </header>
@@ -1056,6 +1038,9 @@ export default function App() {
               dividendRecords={dividendRecords}
               alerts={investorAlerts}
               fearGreed={fearGreed}
+              isLoadingMarket={isSyncing}
+              marketError={syncError}
+              onRetryMarket={() => void handleLiveSyncAll(false)}
               onNavigate={handleNavigate}
             />
           )}
@@ -1065,10 +1050,13 @@ export default function App() {
               portfolio={portfolio}
               calendarEvents={calendarEvents}
               newsItems={newsItems}
+              liveQuotes={liveQuotes}
               isSignedInLocal={activeAccountId !== GUEST_ACCOUNT_ID}
               accountLabel={activeAccountLabel}
               onAddAsset={handleAddAsset}
               onRemoveAsset={handleRemoveAsset}
+              onUpdateAssetCost={handleUpdateAssetCost}
+              onOpenChart={setChartTargetAsset}
               onExportJson={handleExportJson}
               onImportJsonFile={handleImportJsonFile}
               onOpenAuth={() => setAuthModalOpen(true)}
@@ -1087,6 +1075,10 @@ export default function App() {
                 handleNavigate('news', { searchQuery: symbol, newsSubTab: 'global' })
               }
               onGoToPortfolio={() => handleNavigate('portfolio')}
+              isLoading={isSyncing}
+              error={syncError}
+              sources={syncSources}
+              onRetrySync={() => void handleLiveSyncAll(false)}
             />
           )}
 
@@ -1095,10 +1087,12 @@ export default function App() {
               portfolio={portfolio}
               earnings={earningsRecords}
               dividends={dividendRecords}
-              sources={earningsSources}
-              isSyncing={isSyncingEarnings}
-              lastSyncedAt={lastEarningsSyncAt}
-              onSyncLive={() => void syncEarningsXDLive(false)}
+              liveQuotes={liveQuotes}
+              sources={syncSources}
+              isSyncing={isSyncing}
+              error={syncError}
+              lastSyncedAt={lastSyncedAt}
+              onSyncLive={() => void handleLiveSyncAll(false)}
               onGoToPortfolio={() => handleNavigate('portfolio')}
             />
           )}
@@ -1116,10 +1110,14 @@ export default function App() {
               searchQuery={newsSearchQuery}
               onSearchQueryChange={setNewsSearchQuery}
               sources={syncSources}
-              socialSources={socialSources}
-              isSyncingSocial={isSyncingSocial}
-              lastSocialSyncAt={lastSocialSyncAt}
-              onSyncSocialLive={() => void syncSocialInsightsLive(false)}
+              socialSources={syncSources}
+              isLoadingNews={isSyncing}
+              newsError={syncError}
+              onRetryMarket={() => void handleLiveSyncAll(false)}
+              isSyncingSocial={isSyncing}
+              socialError={syncError}
+              lastSocialSyncAt={lastSyncedAt}
+              onSyncSocialLive={() => void handleLiveSyncAll(false)}
               onGoToPortfolio={() => handleNavigate('portfolio')}
             />
           )}
@@ -1161,6 +1159,14 @@ export default function App() {
         onAuthChange={handleAuthChange}
         onExportJson={handleExportJson}
         onImportJsonFile={handleImportJsonFile}
+      />
+
+      {/* Technical Charting, Breakeven P/L & On-Demand AI Elliott Wave Modal */}
+      <TechnicalChartModal
+        asset={chartTargetAsset}
+        quota={quota}
+        onClose={() => setChartTargetAsset(null)}
+        onUpdateCost={handleUpdateAssetCost}
       />
     </div>
   );

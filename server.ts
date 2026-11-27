@@ -3,7 +3,30 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import type { ChartTimeframe, WavePoint } from './src/types.ts';
+import {
+  GEMINI_MODEL,
+  GEMINI_MODEL_CHAIN,
+  buildBatchedInvestCalPrompt,
+  buildChartTechnicalPrompt,
+  buildClassifyAssetPrompt,
+  buildPublicOnlyFallbackBatchedResponse,
+  getTodayIso,
+  isModelNotFoundError,
+  isRetryableQuotaError,
+  parseBatchedInvestCalResponse,
+  parseChartTechnicalResponse,
+  parseClassifiedAssetResponse,
+  parsePortfolioPayload,
+  parseValidIsoDate,
+} from './src/utils/geminiParsers.ts';
+import {
+  collectLivePublicRssNews,
+  collectLiveYahooQuotes,
+  fetchYahooHistoricalCandles,
+  searchYahooFinanceAutocomplete,
+} from './src/utils/publicMarketFeeds.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,37 +34,101 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const isProd = process.env.NODE_ENV === 'production';
 
-function getTodayIso(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+// Model health tracking to avoid wasting calls on 404 or cooling-down models
+let activeServerModel: string = GEMINI_MODEL;
+const permanentlyUnavailableModels = new Set<string>();
+const rateLimitedUntilMs = new Map<string, number>();
+
+const MODEL_COOLDOWN_MS = 60_000;
+const BATCHED_SERVER_CACHE_TTL_MS = 15 * 60_000;
+const CLASSIFY_CACHE_TTL_MS = 60 * 60_000;
+const CHART_HISTORY_CACHE_TTL_MS = 15 * 60_000;
+const CHART_ANALYSIS_CACHE_TTL_MS = 30 * 60_000;
+
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
 }
 
-function addDaysIso(days: number): string {
-  const now = new Date();
-  const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + days);
-  const year = target.getFullYear();
-  const month = String(target.getMonth() + 1).padStart(2, '0');
-  const day = String(target.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+const responseCache = new Map<string, CacheEntry<unknown>>();
+const inFlightRequests = new Map<string, Promise<unknown>>();
+
+let lastGeminiCallAt = 0;
+let pacingQueue: Promise<void> = Promise.resolve();
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function extractJsonBlock(rawText: string): string {
-  const fenced = rawText.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced && fenced[1]) {
-    return fenced[1].trim();
+async function acquireGeminiSlot(): Promise<void> {
+  const prev = pacingQueue;
+  let release!: () => void;
+  pacingQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await prev;
+  const elapsed = Date.now() - lastGeminiCallAt;
+  const minGapMs = 400;
+  if (elapsed < minGapMs) {
+    await sleep(minGapMs - elapsed);
   }
-  const firstBrace = rawText.indexOf('{');
-  const lastBrace = rawText.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    return rawText.slice(firstBrace, lastBrace + 1);
-  }
-  return rawText.trim();
+  lastGeminiCallAt = Date.now();
+  release();
 }
 
-function createGeminiClient(apiKey: string) {
+function getCachedValue<T>(key: string): T | null {
+  const entry = responseCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    responseCache.delete(key);
+    return null;
+  }
+  return entry.data as T;
+}
+
+function setCachedValue<T>(key: string, data: T, ttlMs: number): void {
+  responseCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+  if (responseCache.size > 160) {
+    const oldestKey = responseCache.keys().next().value;
+    if (oldestKey) responseCache.delete(oldestKey);
+  }
+}
+
+async function withServerCacheAndDedup<T>(
+  cacheKey: string,
+  ttlMs: number,
+  force: boolean,
+  fetcher: () => Promise<T>
+): Promise<{ data: T; fromServerCache: boolean }> {
+  if (!force) {
+    const cached = getCachedValue<T>(cacheKey);
+    if (cached) return { data: cached, fromServerCache: true };
+  }
+
+  const existingInFlight = inFlightRequests.get(cacheKey);
+  if (existingInFlight) {
+    const data = (await existingInFlight) as T;
+    return { data, fromServerCache: true };
+  }
+
+  const promise = (async () => {
+    try {
+      const result = await fetcher();
+      setCachedValue(cacheKey, result, ttlMs);
+      return result;
+    } finally {
+      inFlightRequests.delete(cacheKey);
+    }
+  })();
+
+  inFlightRequests.set(cacheKey, promise);
+  const data = await promise;
+  return { data, fromServerCache: false };
+}
+
+function createGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
@@ -52,757 +139,442 @@ function createGeminiClient(apiKey: string) {
   });
 }
 
-function extractGroundingSources(
-  response: unknown
-): Array<{ title: string; uri: string }> {
-  const resObj = response as {
-    candidates?: Array<{
-      groundingMetadata?: {
-        groundingChunks?: Array<{ web?: { title?: string; uri?: string } }>;
-      };
-    }>;
-  };
-  const rawChunks = resObj.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
-  const sources: Array<{ title: string; uri: string }> = [];
-  const seenUris = new Set<string>();
+function getCandidateModels(): string[] {
+  const now = Date.now();
+  const baseOrder = [
+    activeServerModel,
+    ...GEMINI_MODEL_CHAIN.filter((m) => m !== activeServerModel),
+  ].filter((m) => !permanentlyUnavailableModels.has(m));
 
-  for (const chunk of rawChunks) {
-    const web = chunk?.web;
-    if (web?.uri && !seenUris.has(web.uri)) {
-      seenUris.add(web.uri);
-      sources.push({
-        title: web.title || web.uri,
-        uri: web.uri,
+  const ready = baseOrder.filter((m) => (rateLimitedUntilMs.get(m) ?? 0) <= now);
+  const cooling = baseOrder.filter((m) => (rateLimitedUntilMs.get(m) ?? 0) > now);
+  return [...ready, ...cooling];
+}
+
+/**
+ * Free-Tier-Safe Server-Side Gemini JSON generator (ZERO googleSearch tool -> zero Search Grounding 429s).
+ */
+async function generateJsonWithFallback(ai: GoogleGenAI, contents: string) {
+  const candidates = getCandidateModels();
+  let lastError: unknown;
+
+  for (const model of candidates) {
+    try {
+      await acquireGeminiSlot();
+      const config: {
+        responseMimeType: string;
+        thinkingConfig?: { thinkingLevel: ThinkingLevel };
+      } = {
+        responseMimeType: 'application/json',
+      };
+
+      if (model.startsWith('gemini-4')) {
+        config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+
+      const response = await ai.models.generateContent({
+        model,
+        contents,
+        config,
       });
+
+      activeServerModel = model;
+      rateLimitedUntilMs.delete(model);
+      return response;
+    } catch (err) {
+      lastError = err;
+
+      if (isModelNotFoundError(err)) {
+        permanentlyUnavailableModels.add(model);
+        continue;
+      }
+
+      if (isRetryableQuotaError(err)) {
+        rateLimitedUntilMs.set(model, Date.now() + MODEL_COOLDOWN_MS);
+        continue;
+      }
+
+      throw err;
     }
   }
-  return sources.slice(0, 8);
+
+  throw lastError;
 }
 
-interface PortfolioEntryInput {
-  symbol: string;
-  name: string;
-  category: string;
-  sector: string;
-  topHoldings?: string[];
-}
+function formatServerGeminiError(
+  err: unknown,
+  fallbackThai: string
+): { status: number; message: string; rateLimited: boolean; isDailyLimit: boolean } {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  const lower = raw.toLowerCase();
 
-function parsePortfolioPayload(rawPortfolio: unknown, rawSymbols?: unknown): PortfolioEntryInput[] {
-  if (Array.isArray(rawPortfolio)) {
-    return rawPortfolio
-      .filter(
-        (item): item is Record<string, unknown> =>
-          Boolean(item) &&
-          typeof item === 'object' &&
-          typeof (item as Record<string, unknown>).symbol === 'string'
-      )
-      .slice(0, 25)
-      .map((item) => ({
-        symbol: String(item.symbol).trim().toUpperCase(),
-        name: typeof item.name === 'string' ? item.name.slice(0, 80) : String(item.symbol),
-        category: typeof item.category === 'string' ? item.category : 'US Stock',
-        sector: typeof item.sector === 'string' ? item.sector.slice(0, 60) : '',
-        topHoldings: Array.isArray(item.topHoldings)
-          ? item.topHoldings.filter((h): h is string => typeof h === 'string').slice(0, 6)
-          : undefined,
-      }));
+  if (raw.includes('GEMINI_API_KEY')) {
+    return { status: 503, message: raw, rateLimited: false, isDailyLimit: false };
   }
-  if (Array.isArray(rawSymbols)) {
-    return rawSymbols
-      .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
-      .slice(0, 25)
-      .map((s) => ({ symbol: s.trim().toUpperCase(), name: s.trim(), category: '', sector: '' }));
+  if (
+    raw.includes('API_KEY_INVALID') ||
+    raw.includes('403') ||
+    raw.includes('PERMISSION_DENIED')
+  ) {
+    return {
+      status: 403,
+      message: 'API Key ไม่ถูกต้องหรือไม่ได้รับอนุญาต กรุณาตรวจสอบคีย์ใน Settings > Secrets',
+      rateLimited: false,
+      isDailyLimit: false,
+    };
   }
-  return [];
+  if (isRetryableQuotaError(err)) {
+    const isDailyLimit = lower.includes('perday') || lower.includes('daily') || lower.includes('rpd');
+    return {
+      status: 429,
+      message: isDailyLimit
+        ? 'โควตา Gemini API รายวันเต็มชั่วคราว (รีเซ็ตอัตโนมัติเวลา 00:00 น. ตามเวลาแปซิฟิก) ระบบยังคงแสดงข่าว RSS ราคา และกราฟฟรีตามปกติ'
+        : 'โควตา Gemini API ต่อนาทีเต็มชั่วคราว กรุณารอคูลดาวน์ 60 วินาทีแล้วลองใหม่อีกครั้ง',
+      rateLimited: true,
+      isDailyLimit,
+    };
+  }
+  if (raw.includes('ไม่พบข้อมูลหุ้น') || raw.includes('ไม่พบหุ้น')) {
+    return { status: 404, message: raw, rateLimited: false, isDailyLimit: false };
+  }
+  return {
+    status: 502,
+    message: raw ? `${fallbackThai}: ${raw}` : fallbackThai,
+    rateLimited: false,
+    isDailyLimit: false,
+  };
 }
 
-const VALID_CATEGORIES = new Set([
-  'US ETF',
-  'Thai Stock',
-  'US Stock',
-  'Crypto',
-  'Commodity',
-  'Forex',
-]);
+function buildServerPortfolioSig(portfolio: Array<{ symbol: string }>): string {
+  return portfolio
+    .map((p) => p.symbol.toUpperCase())
+    .sort()
+    .join(',');
+}
+
+function parseValidTimeframe(raw: unknown): ChartTimeframe {
+  return raw === '4H' || raw === '1H' ? raw : '1D';
+}
 
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', hasGeminiKey: Boolean(process.env.GEMINI_API_KEY) });
+    res.json({
+      status: 'ok',
+      mode: 'free-public-feeds-plus-batched-gemini',
+      model: activeServerModel,
+      googleSearchGrounding: false,
+      hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+    });
   });
 
-  // 1. Auto-classify any custom ticker using Gemini AI
+  // 1. Global Asset Lookup: Free Yahoo Finance Autocomplete first, optional Gemini enrichment (NO googleSearch)
   app.post('/api/classify-asset', async (req, res) => {
-    const rawSymbol = typeof req.body?.symbol === 'string' ? req.body.symbol.trim() : '';
-    const cleanedSymbol = rawSymbol
-      .toUpperCase()
-      .replace(/[^A-Z0-9./-]/g, '')
-      .slice(0, 20);
+    const rawInput =
+      typeof req.body?.query === 'string' && req.body.query.trim()
+        ? req.body.query.trim()
+        : typeof req.body?.symbol === 'string'
+        ? req.body.symbol.trim()
+        : '';
 
-    if (!cleanedSymbol) {
-      res.status(400).json({ error: 'กรุณาระบุชื่อย่อสินทรัพย์ (Ticker) ที่ถูกต้อง' });
+    const safeQuery = rawInput.slice(0, 100);
+    if (!safeQuery) {
+      res
+        .status(400)
+        .json({ error: 'กรุณาระบุชื่อบริษัทหรือชื่อย่อสินทรัพย์ (Ticker) ที่ต้องการค้นหา' });
       return;
     }
 
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      res.status(503).json({
-        error: 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY บนเซิร์ฟเวอร์สำหรับจำแนก Ticker อัตโนมัติ',
-      });
-      return;
-    }
-
+    const cacheKey = `classify::${safeQuery.toLowerCase()}`;
     try {
-      const ai = createGeminiClient(apiKey);
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: `ระบุข้อมูลทางการเงินของ Ticker "${cleanedSymbol}" อย่างแม่นยำ (รองรับทั้ง US ETF, หุ้นไทย SET/mai, หุ้นสหรัฐฯ, คริปโต, โภคภัณฑ์ และ Forex)
-- ถ้าเป็นหุ้นไทยใน SET/mai เช่น KCG, PTT, OSP, NETBAY, JMT ให้ตั้ง category = "Thai Stock", market = "SET" หรือ "mai", flag = "🇹🇭", currency = "THB", hasDividends = true, hasEarnings = true
-- ถ้าเป็น ETF หุ้นสหรัฐฯ เช่น QQQM, SMH, BLOK, VOO, SCHD ให้ตั้ง category = "US ETF", flag = "🇺🇸", currency = "USD", ระบุ topHoldings 3-4 ตัวหลัก (เช่น NVDA, AAPL, MSFT), hasDividends = true, hasEarnings = true
-- ถ้าเป็น ETF ทอง/เงิน/คริปโต หรือ Crypto/Commodity เช่น GLD, SLV, IBIT, BTC, ETH, XAUUSD, XAGUSD ให้ตั้ง hasDividends = false, hasEarnings = false
-- ถ้าเป็น ETF พันธบัตร เช่น SGOV, JPST, TLT ให้ตั้ง hasDividends = true, hasEarnings = false
-- ใน themes ให้เลือกแท็กที่เกี่ยวข้องจากชุดนี้ (สูงสุด 5 แท็ก): us_equity, us_broad, us_tech, semiconductor, ai_chips, us_dividend, us_rates_sensitive, us_treasury_short, us_treasury_long, crypto_equity, crypto_spot, bitcoin, gold, silver, precious_metals, dxy_sensitive, thai_equity, thai_food, dairy_import, thai_bank, thai_energy, thai_consumer, thai_tourism, thai_healthcare, thai_dividend, thai_rates_sensitive, usd_thb_sensitive, china_demand, oil_commodity, global_equity, japan_equity, jpy_sensitive, eu_macro_sensitive`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              symbol: { type: Type.STRING },
-              name: { type: Type.STRING },
-              category: {
-                type: Type.STRING,
-                enum: ['US ETF', 'Thai Stock', 'US Stock', 'Crypto', 'Commodity', 'Forex'],
-              },
-              market: { type: Type.STRING },
-              flag: { type: Type.STRING },
-              currency: { type: Type.STRING },
-              sector: { type: Type.STRING },
-              themes: { type: Type.ARRAY, items: { type: Type.STRING } },
-              topHoldings: { type: Type.ARRAY, items: { type: Type.STRING } },
-              hasDividends: { type: Type.BOOLEAN },
-              hasEarnings: { type: Type.BOOLEAN },
-            },
-            required: ['symbol', 'name', 'category', 'market', 'flag', 'currency', 'sector', 'themes'],
-          },
-        },
-      });
+      const { data, fromServerCache } = await withServerCacheAndDedup(
+        cacheKey,
+        CLASSIFY_CACHE_TTL_MS,
+        Boolean(req.body?.force),
+        async () => {
+          // Step 1: Query Yahoo Finance Autocomplete for free (0 Gemini quota)
+          const yahooMatch = await searchYahooFinanceAutocomplete(safeQuery, false);
+          const ai = createGeminiClient();
 
-      const parsed = JSON.parse((response.text ?? '{}').trim());
-      const category = VALID_CATEGORIES.has(parsed.category) ? parsed.category : 'US Stock';
-
-      res.json({
-        symbol: cleanedSymbol,
-        name:
-          typeof parsed.name === 'string' && parsed.name.trim()
-            ? parsed.name.trim().slice(0, 140)
-            : cleanedSymbol,
-        category,
-        market:
-          typeof parsed.market === 'string' && parsed.market.trim()
-            ? parsed.market.trim().slice(0, 40)
-            : category === 'Thai Stock'
-            ? 'SET'
-            : 'Global',
-        flag:
-          typeof parsed.flag === 'string' && parsed.flag.trim()
-            ? parsed.flag.trim().slice(0, 12)
-            : category === 'Thai Stock'
-            ? '🇹🇭'
-            : category === 'US ETF' || category === 'US Stock'
-            ? '🇺🇸'
-            : '🌐',
-        currency:
-          typeof parsed.currency === 'string' && parsed.currency.trim()
-            ? parsed.currency.trim().slice(0, 12)
-            : category === 'Thai Stock'
-            ? 'THB'
-            : 'USD',
-        sector:
-          typeof parsed.sector === 'string' && parsed.sector.trim()
-            ? parsed.sector.trim().slice(0, 80)
-            : 'ทั่วไป (General)',
-        themes: Array.isArray(parsed.themes)
-          ? parsed.themes
-              .filter((t: unknown): t is string => typeof t === 'string' && t.trim().length > 0)
-              .map((t: string) => t.trim().slice(0, 40))
-              .slice(0, 6)
-          : [],
-        topHoldings: Array.isArray(parsed.topHoldings)
-          ? parsed.topHoldings
-              .filter((t: unknown): t is string => typeof t === 'string' && t.trim().length > 0)
-              .map((t: string) => t.trim().toUpperCase().slice(0, 15))
-              .slice(0, 5)
-          : undefined,
-        hasDividends: typeof parsed.hasDividends === 'boolean' ? parsed.hasDividends : undefined,
-        hasEarnings: typeof parsed.hasEarnings === 'boolean' ? parsed.hasEarnings : undefined,
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'ไม่สามารถจำแนก Ticker ได้';
-      console.error('[/api/classify-asset] error:', message);
-      res.status(502).json({ error: `ไม่สามารถจำแนก Ticker ด้วย AI ได้: ${message}` });
-    }
-  });
-
-  // 2. Live Calendar + News + Directional Asset Forecasts via Google Search Grounding
-  app.post('/api/sync', async (req, res) => {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      res.status(503).json({
-        error: 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY บนเซิร์ฟเวอร์ จึงไม่สามารถดึงข้อมูลแบบเรียลไทม์จาก Google Search ได้ในขณะนี้',
-      });
-      return;
-    }
-
-    const portfolioEntries = parsePortfolioPayload(req.body?.portfolio, req.body?.symbols);
-    const hasPortfolio = portfolioEntries.length > 0;
-    const portfolioSummaryText = hasPortfolio
-      ? portfolioEntries
-          .map((p) => `${p.symbol} (${p.category}${p.sector ? ` · ${p.sector}` : ''})`)
-          .join(', ')
-      : 'พอร์ตยังว่าง (วิเคราะห์ทิศทางต่อสินทรัพย์หลักทั่วโลก เช่น QQQM, SMH, GLD, SLV, VOO, BTC, KCG)';
-
-    const today = getTodayIso();
-    const endDate = addDaysIso(14);
-    const yesterday = addDaysIso(-1);
-
-    try {
-      const ai = createGeminiClient(apiKey);
-      const prompt = `คุณเป็นนักวิเคราะห์ตลาดการเงินระดับโลก ใช้ Google Search ค้นหาข้อมูลเศรษฐกิจและข่าวการลงทุนล่าสุด ณ วันที่ ${today}
-สินทรัพย์จริงในพอร์ตของผู้ใช้ขณะนี้: ${portfolioSummaryText}
-
-กรุณาสรุปข้อมูลล่าสุดเป็นภาษาไทยทั้งหมดในรูปแบบ JSON เพียงอย่างเดียว (ห้ามมีข้อความอื่นนอก JSON) ตามโครงสร้างต่อไปนี้:
-{
-  "fearGreed": {
-    "value": <ตัวเลข CNN Fear & Greed Index ล่าสุด 0-100>,
-    "previousClose": <ตัวเลขวันก่อนหน้า>,
-    "oneWeekAgo": <ตัวเลขสัปดาห์ที่แล้ว>,
-    "oneMonthAgo": <ตัวเลขเดือนที่แล้ว>,
-    "marketNote": "<สรุปบรรยากาศตลาดโลกสั้นๆ 1 ประโยคภาษาไทย>"
-  },
-  "calendarEvents": [
-    {
-      "date": "<YYYY-MM-DD ระหว่าง ${yesterday} ถึง ${endDate}>",
-      "time": "<HH:mm เวลาไทย ICT>",
-      "countryCode": "<US|TH|CN|EU|JP|GB|NZ|AU>",
-      "flag": "<อีโมจิธงชาติ เช่น 🇺🇸 🇹🇭 🇨🇳 🇪🇺 🇯🇵 🇬🇧 🇳🇿>",
-      "currency": "<USD|THB|CNY|EUR|JPY|GBP|NZD|AUD>",
-      "countryNameTh": "<ชื่อประเทศภาษาไทย>",
-      "impact": <1 | 2 | 3>,
-      "category": "<economic | earnings | dividend>",
-      "title": "<ชื่อเหตุการณ์ภาษาไทยพร้อมชื่อย่ออังกฤษ>",
-      "actual": "<ค่าจริง หรือ — ถ้ายังไม่ประกาศ>",
-      "forecast": "<ค่าคาดการณ์ หรือ —>",
-      "previous": "<ค่าครั้งก่อน หรือ —>",
-      "actualOutcome": "<better | worse | inline | pending>",
-      "relatedAssets": ["<Ticker ที่เกี่ยวข้อง>"],
-      "macroTags": ["<เลือกจาก: us_rates, us_inflation, us_jobs, bond_yield, dxy, ai_chips, crypto, precious_metals, bot_rate, thai_cpi, thai_macro, usd_thb, food_dairy, china_macro, boj_jpy, eu_macro, uk_macro>"],
-      "descriptionTh": "<คำอธิบายสั้นๆ 1 ประโยคว่ากระทบตลาดอย่างไร>",
-      "assetForecasts": [
-        {
-          "symbol": "<Ticker ในพอร์ตหรือสินทรัพย์ที่เกี่ยวข้องโดยตรง เช่น QQQM, SMH, GLD, KCG>",
-          "direction": "<bullish | bearish | neutral>",
-          "reasonTh": "<เหตุผลสั้นกระชับภาษาไทยว่าทำไมคาดว่าจะขึ้น/ลง/คงที่ (เทียบ Actual vs Forecast หรือแนวโน้มก่อนประกาศ)>",
-          "scenarioNoteTh": "<ถ้ายังไม่ประกาศ ให้ระบุเงื่อนไข เช่น หากสูงกว่าคาด → ลง / ต่ำกว่าคาด → ขึ้น>"
-        }
-      ],
-      "aiImpacts": [
-        {
-          "symbol": "<ต้องเป็น Ticker ที่อยู่ในพอร์ตจริงของผู้ใช้เท่านั้น>",
-          "relation": "<direct | indirect>",
-          "severity": "<high | medium | low>",
-          "direction": "<bullish | bearish | neutral>",
-          "reasonTh": "<เหตุผลสั้นกระชับ 1 ประโยคว่ากระทบทางตรงหรือทางอ้อมอย่างไร>"
-        }
-      ]
-    }
-  ],
-  "newsItems": [
-    {
-      "timeLabel": "<เช่น ล่าสุดวันนี้ หรือ 1 ชม. ที่แล้ว>",
-      "source": "<ชื่อแหล่งข่าว เช่น Bloomberg, Reuters, CNBC, SET>",
-      "headline": "<พาดหัวข่าวภาษาไทยที่กระชับ ชัดเจน>",
-      "impactSummary": "<อธิบายสั้นๆ 1-2 ประโยคว่าข่าวนี้ส่งผลบวกหรือลบต่อตลาดอย่างไร>",
-      "sentiment": "<bullish | bearish | neutral>",
-      "relatedAssets": ["<Ticker ที่ได้รับผลกระทบ>"],
-      "macroTags": ["<เลือกจากชุดเดียวกับด้านบน>"],
-      "countryCode": "<US|TH|CN|EU|JP|GB|GLOBAL>",
-      "countryFlag": "<อีโมจิธงชาติ เช่น 🇺🇸 🇹🇭 🇨🇳 🇪🇺 🇯🇵 🇬🇧 🌐>",
-      "aiImpacts": [
-        {
-          "symbol": "<ต้องเป็น Ticker ที่อยู่ในพอร์ตจริงของผู้ใช้เท่านั้น>",
-          "relation": "<direct | indirect>",
-          "severity": "<high | medium | low>",
-          "direction": "<bullish | bearish | neutral>",
-          "reasonTh": "<เหตุผลสั้นกระชับว่าส่งผลต่อสินทรัพย์นี้ในพอร์ตอย่างไร>"
-        }
-      ]
-    }
-  ]
-}
-
-เงื่อนไขสำคัญ:
-- สร้าง calendarEvents จำนวน 10-14 รายการจริงที่สำคัญในช่วง ${yesterday} ถึง ${endDate} ครอบคลุมหลายประเทศ (🇺🇸 สหรัฐฯ, 🇹🇭 ไทย, 🇨🇳 จีน, 🇪🇺 ยุโรป, 🇯🇵 ญี่ปุ่น, 🇬🇧 อังกฤษ)
-- ทุกเหตุการณ์ใน calendarEvents ต้องมี assetForecasts 2-4 สินทรัพย์ พร้อมทิศทาง bullish (ขึ้น) / bearish (ลง) / neutral (คงที่) ทั้งรายการที่ประกาศแล้วและที่กำลังจะประกาศ
-- สร้าง newsItems จำนวน 8-10 ข่าวจริงล่าสุดที่มีผลต่อตลาดโลกและสินทรัพย์ในพอร์ตของผู้ใช้ พร้อมระบุ countryCode และ countryFlag
-- ใน aiImpacts ให้ใส่เฉพาะ Ticker ที่มีอยู่ในพอร์ตจริงของผู้ใช้เท่านั้น (ถ้าพอร์ตว่างให้ใส่ [])
-- ตอบกลับเป็น JSON ที่ถูกต้องตาม syntax เท่านั้น`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: prompt,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          tools: [{ googleSearch: {} }],
-        },
-      });
-
-      const parsed = JSON.parse(extractJsonBlock(response.text ?? ''));
-      const sources = extractGroundingSources(response);
-      const syncedAt = new Date().toISOString();
-
-      const sanitizeAiImpacts = (rawImpacts: unknown) => {
-        if (!Array.isArray(rawImpacts)) return [];
-        return rawImpacts
-          .filter(
-            (x): x is Record<string, unknown> =>
-              Boolean(x) &&
-              typeof x === 'object' &&
-              typeof (x as Record<string, unknown>).symbol === 'string'
-          )
-          .map((x) => ({
-            symbol: String(x.symbol).trim().toUpperCase(),
-            relation: x.relation === 'indirect' ? 'indirect' : 'direct',
-            severity: x.severity === 'high' || x.severity === 'low' ? x.severity : 'medium',
-            direction:
-              x.direction === 'bullish' || x.direction === 'bearish' ? x.direction : 'neutral',
-            reasonTh: typeof x.reasonTh === 'string' ? x.reasonTh.slice(0, 200) : '',
-          }))
-          .filter((x) => x.reasonTh.length > 0);
-      };
-
-      const sanitizeForecasts = (rawForecasts: unknown) => {
-        if (!Array.isArray(rawForecasts)) return [];
-        return rawForecasts
-          .filter(
-            (x): x is Record<string, unknown> =>
-              Boolean(x) &&
-              typeof x === 'object' &&
-              typeof (x as Record<string, unknown>).symbol === 'string'
-          )
-          .map((x) => ({
-            symbol: String(x.symbol).trim().toUpperCase(),
-            direction:
-              x.direction === 'bullish' || x.direction === 'bearish' ? x.direction : 'neutral',
-            reasonTh: typeof x.reasonTh === 'string' ? x.reasonTh.slice(0, 200) : '',
-            scenarioNoteTh:
-              typeof x.scenarioNoteTh === 'string' && x.scenarioNoteTh.trim()
-                ? x.scenarioNoteTh.slice(0, 160)
-                : undefined,
-          }))
-          .filter((x) => x.symbol.length > 0 && x.reasonTh.length > 0);
-      };
-
-      const calendarEvents = Array.isArray(parsed.calendarEvents)
-        ? parsed.calendarEvents.map((ev: Record<string, unknown>, idx: number) => ({
-            id: `live-ev-${Date.now()}-${idx}`,
-            date: typeof ev.date === 'string' ? ev.date : today,
-            time: typeof ev.time === 'string' ? ev.time : '19:30',
-            countryCode: typeof ev.countryCode === 'string' ? ev.countryCode.toUpperCase() : 'US',
-            flag: typeof ev.flag === 'string' ? ev.flag : '🌐',
-            currency: typeof ev.currency === 'string' ? ev.currency : 'USD',
-            countryNameTh:
-              typeof ev.countryNameTh === 'string' ? ev.countryNameTh : 'ต่างประเทศ',
-            impact: ev.impact === 3 || ev.impact === 2 || ev.impact === 1 ? ev.impact : 2,
-            category:
-              ev.category === 'earnings' || ev.category === 'dividend' ? ev.category : 'economic',
-            title: typeof ev.title === 'string' ? ev.title : 'เหตุการณ์เศรษฐกิจสำคัญ',
-            actual: typeof ev.actual === 'string' ? ev.actual : '—',
-            forecast: typeof ev.forecast === 'string' ? ev.forecast : '—',
-            previous: typeof ev.previous === 'string' ? ev.previous : '—',
-            actualOutcome:
-              ev.actualOutcome === 'better' ||
-              ev.actualOutcome === 'worse' ||
-              ev.actualOutcome === 'inline'
-                ? ev.actualOutcome
-                : 'pending',
-            relatedAssets: Array.isArray(ev.relatedAssets)
-              ? ev.relatedAssets.filter((x): x is string => typeof x === 'string')
-              : [],
-            macroTags: Array.isArray(ev.macroTags)
-              ? ev.macroTags.filter((x): x is string => typeof x === 'string')
-              : [],
-            descriptionTh: typeof ev.descriptionTh === 'string' ? ev.descriptionTh : '',
-            assetForecasts: sanitizeForecasts(ev.assetForecasts),
-            aiImpacts: sanitizeAiImpacts(ev.aiImpacts),
-            isLiveSynced: true,
-          }))
-        : [];
-
-      const newsItems = Array.isArray(parsed.newsItems)
-        ? parsed.newsItems
-            .map((item: Record<string, unknown>, idx: number) => ({
-              id: `live-news-${Date.now()}-${idx}`,
-              publishedAt: syncedAt,
-              timeLabel: typeof item.timeLabel === 'string' ? item.timeLabel : 'ล่าสุดวันนี้',
-              source: typeof item.source === 'string' ? item.source : 'Global Wire',
-              headline: typeof item.headline === 'string' ? item.headline : '',
-              impactSummary:
-                typeof item.impactSummary === 'string' ? item.impactSummary : '',
-              sentiment:
-                item.sentiment === 'bullish' || item.sentiment === 'bearish'
-                  ? item.sentiment
-                  : 'neutral',
-              relatedAssets: Array.isArray(item.relatedAssets)
-                ? item.relatedAssets.filter((x): x is string => typeof x === 'string')
-                : [],
-              macroTags: Array.isArray(item.macroTags)
-                ? item.macroTags.filter((x): x is string => typeof x === 'string')
-                : [],
-              countryCode:
-                typeof item.countryCode === 'string' ? item.countryCode.toUpperCase() : 'GLOBAL',
-              countryFlag: typeof item.countryFlag === 'string' ? item.countryFlag : '🌐',
-              aiImpacts: sanitizeAiImpacts(item.aiImpacts),
-              isLiveSynced: true,
-            }))
-            .filter((n: { headline: string }) => n.headline.length > 0)
-        : [];
-
-      const fearGreed =
-        parsed.fearGreed && typeof parsed.fearGreed.value === 'number'
-          ? {
-              value: Math.min(100, Math.max(0, Math.round(parsed.fearGreed.value))),
-              previousClose:
-                typeof parsed.fearGreed.previousClose === 'number'
-                  ? Math.round(parsed.fearGreed.previousClose)
-                  : undefined,
-              oneWeekAgo:
-                typeof parsed.fearGreed.oneWeekAgo === 'number'
-                  ? Math.round(parsed.fearGreed.oneWeekAgo)
-                  : undefined,
-              oneMonthAgo:
-                typeof parsed.fearGreed.oneMonthAgo === 'number'
-                  ? Math.round(parsed.fearGreed.oneMonthAgo)
-                  : undefined,
-              marketNote:
-                typeof parsed.fearGreed.marketNote === 'string'
-                  ? parsed.fearGreed.marketNote
-                  : undefined,
-              updatedLabel: 'อัปเดตสดจาก Google Search',
+          if (yahooMatch) {
+            if (ai) {
+              try {
+                const enrichedRes = await generateJsonWithFallback(
+                  ai,
+                  buildClassifyAssetPrompt(safeQuery, yahooMatch)
+                );
+                const parsed = parseClassifiedAssetResponse(enrichedRes.text ?? '', safeQuery);
+                return {
+                  ...yahooMatch,
+                  ...parsed,
+                  symbol: yahooMatch.symbol,
+                  aiCalled: true,
+                };
+              } catch {
+                return { ...yahooMatch, aiCalled: false };
+              }
             }
-          : undefined;
+            return { ...yahooMatch, aiCalled: false };
+          }
 
+          if (!ai) {
+            throw new Error(
+              `ไม่พบข้อมูลหุ้นหรือสินทรัพย์ "${safeQuery}" ใน Yahoo Finance กรุณาลองพิมพ์ตัวย่อภาษาอังกฤษ`
+            );
+          }
+
+          const response = await generateJsonWithFallback(ai, buildClassifyAssetPrompt(safeQuery));
+          return {
+            ...parseClassifiedAssetResponse(response.text ?? '', safeQuery),
+            aiCalled: true,
+          };
+        }
+      );
       res.json({
-        calendarEvents,
-        newsItems,
-        fearGreed,
-        sources,
-        syncedAt,
+        ...data,
+        aiCalled: fromServerCache ? false : Boolean(data.aiCalled),
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดในการซิงค์ข้อมูล';
-      console.error('[/api/sync] error:', message);
-      res.status(502).json({
-        error: `ไม่สามารถซิงค์ข้อมูลสดได้ในขณะนี้: ${message}`,
-      });
+      const { status, message, rateLimited, isDailyLimit } = formatServerGeminiError(
+        err,
+        'ไม่สามารถค้นหาและจำแนกข้อมูลหุ้นจากตลาดทั่วโลกได้'
+      );
+      if (status === 429) {
+        console.warn('[/api/classify-asset] rate-limited:', message);
+      } else {
+        console.error('[/api/classify-asset] error:', message);
+      }
+      res.status(status).json({ error: message, rateLimited, isDailyLimit });
     }
   });
 
-  // 3. Portfolio Earnings Summary & XD Dividend Tracker via Google Search Grounding
-  app.post('/api/earnings-xd', async (req, res) => {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      res.status(503).json({
-        error: 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY บนเซิร์ฟเวอร์',
-      });
-      return;
-    }
-
+  // 2. SINGLE BATCHED SYNC: Free Google News RSS + Free Yahoo Finance Quotes + 1 Gemini Request (NO googleSearch)
+  app.post('/api/batched-sync', async (req, res) => {
     const portfolioEntries = parsePortfolioPayload(req.body?.portfolio);
-    if (portfolioEntries.length === 0) {
-      res.json({
-        earnings: [],
-        dividends: [],
-        sources: [],
-        syncedAt: new Date().toISOString(),
-      });
-      return;
-    }
-
-    const today = getTodayIso();
-    const portfolioDesc = portfolioEntries
-      .map(
-        (p) =>
-          `${p.symbol} (${p.name} · ${p.category}${
-            p.topHoldings?.length ? ` · Top Holdings: ${p.topHoldings.join(', ')}` : ''
-          })`
-      )
-      .join('\n- ');
+    const today = parseValidIsoDate(req.body?.todayIso) || getTodayIso();
+    const force = Boolean(req.body?.force);
+    const cacheKey = `batched::${today}::${buildServerPortfolioSig(portfolioEntries)}`;
 
     try {
-      const ai = createGeminiClient(apiKey);
-      const prompt = `คุณเป็นนักวิเคราะห์งบการเงินและปันผลระดับสถาบัน ใช้ Google Search ค้นหาข้อมูลงบการเงินล่าสุดและกำหนดวันขึ้นเครื่องหมาย XD ล่าสุด ณ วันที่ ${today} สำหรับสินทรัพย์ในพอร์ตต่อไปนี้:
-- ${portfolioDesc}
+      const { data, fromServerCache } = await withServerCacheAndDedup(
+        cacheKey,
+        BATCHED_SERVER_CACHE_TTL_MS,
+        force,
+        async () => {
+          const [rssHeadlines, yahooQuotes] = await Promise.all([
+            collectLivePublicRssNews(portfolioEntries, false),
+            collectLiveYahooQuotes(portfolioEntries, today, false),
+          ]);
 
-กรุณาตอบกลับเป็น JSON เพียงอย่างเดียวตามโครงสร้างนี้ (ห้ามมีข้อความอื่นนอก JSON):
-{
-  "earnings": [
-    {
-      "portfolioSymbol": "<Ticker ในพอร์ตของผู้ใช้>",
-      "reportedSymbol": "<Ticker ของบริษัทที่รายงานงบ (ถ้าเป็นหุ้นรายตัวเช่น KCG/NVDA ให้ตรงกับ portfolioSymbol; ถ้าเป็น Equity ETF เช่น QQQM/SMH/BLOK ให้ดึง Top Holdings 1-2 ตัวหลัก เช่น NVDA, TSM, AVGO, AAPL, MSFT, COIN)>",
-      "reportedName": "<ชื่อเต็มบริษัท>",
-      "isTopHolding": <true ถ้าเป็น Top Holding ของ ETF, false ถ้าเป็นหุ้นรายตัว>,
-      "holdingWeight": "<สัดส่วนน้ำหนักใน ETF เช่น 20.4% ถ้ามี>",
-      "flag": "<อีโมจิธงชาติ เช่น 🇺🇸 🇹🇭 🇹🇼>",
-      "reportDate": "<YYYY-MM-DD วันที่ประกาศงบล่าสุดหรือกำลังจะประกาศ หรือ — ถ้าไม่อิงงบ>",
-      "periodLabel": "<เช่น Q3 2026 หรือ กำลังประกาศงบ หรือ ไม่อิงงบการเงิน>",
-      "revenueSummary": "<สรุปรายได้และ % YoY เช่น รายได้ $35.1B (+68% YoY)>",
-      "profitSummary": "<สรุปกำไร/EPS เทียบคาดการณ์ เช่น EPS $0.89 (ดีกว่าคาด +6%)>",
-      "yoyChange": "<เช่น +68% YoY>",
-      "status": "<beat | inline | miss | upcoming | not_applicable>",
-      "trendSummaryTh": "<สรุปแนวโน้มธุรกิจ 2-3 บรรทัดภาษาไทยที่อ่านเข้าใจง่าย>",
-      "daysUntil": <จำนวนวันจนถึงวันประกาศงบ ถ้าเป็นอนาคตให้ใส่เลข >= 0, ถ้าประกาศไปแล้วให้ใส่เลขติดลบ, ถ้าไม่ทราบใส่ null>
-    }
-  ],
-  "dividends": [
-    {
-      "symbol": "<Ticker ในพอร์ตของผู้ใช้>",
-      "name": "<ชื่อเต็ม>",
-      "flag": "<อีโมจิธงชาติ>",
-      "applicable": <true ถ้าจ่ายปันผล, false สำหรับสินทรัพย์ที่ไม่มีปันผลเช่น GLD, SLV, BTC, ETH, XAUUSD, XAGUSD, IBIT>,
-      "notApplicableReasonTh": "<ถ้า applicable=false ให้ใส่ 'ไม่มีปันผล / ไม่อิงงบการเงิน'>",
-      "xdDate": "<YYYY-MM-DD วันขึ้นเครื่องหมาย XD ล่าสุด/ถัดไป หรือ —>",
-      "daysUntilXD": <จำนวนวันจนถึงวัน XD ถัดไป หรือ null>,
-      "dps": "<เงินปันผลต่อหุ้น/หน่วย เช่น ฿0.38 หรือ $0.265 หรือ —>",
-      "dividendYield": "<อัตราปันผลต่อปี เช่น 4.1% หรือ —>",
-      "payDate": "<YYYY-MM-DD วันจ่ายเงินปันผล หรือ —>",
-      "frequency": "<เช่น รายไตรมาส / ปีละ 2 ครั้ง / รายเดือน>",
-      "noteTh": "<หมายเหตุสั้นๆ 1 ประโยคภาษาไทย>"
-    }
-  ]
-}
+          const ai = createGeminiClient();
+          if (!ai) {
+            return {
+              ...buildPublicOnlyFallbackBatchedResponse(
+                portfolioEntries,
+                rssHeadlines,
+                yahooQuotes,
+                today,
+                'ยังไม่ได้ตั้งค่า GEMINI_API_KEY — แสดงข่าวสดจาก Google News RSS และราคา/ปันผลจริงจาก Yahoo Finance โดยตรง'
+              ),
+              aiCalled: false,
+              rateLimited: false,
+            };
+          }
 
-เงื่อนไขสำคัญ:
-- ครอบคลุมทุก Ticker ในพอร์ตของผู้ใช้ให้ครบถ้วน
-- สำหรับ GLD, SLV, BTC, ETH, XAUUSD, XAGUSD, IBIT หรือสินทรัพย์โภคภัณฑ์/คริปโตที่ไม่มีปันผลและไม่อิงงบ ให้ใส่ status = "not_applicable" ใน earnings และ applicable = false พร้อม notApplicableReasonTh = "ไม่มีปันผล / ไม่อิงงบการเงิน" ใน dividends
-- สำหรับ ETF พันธบัตร (เช่น SGOV, JPST, TLT) มีปันผลรายเดือน (applicable = true) แต่ไม่อิงงบการเงินบริษัท (status = "not_applicable")
-- ใช้ข้อมูลจริงจาก Google Search เท่านั้น และตอบเป็น JSON ที่ถูกต้องตาม syntax`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: prompt,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          tools: [{ googleSearch: {} }],
-        },
-      });
-
-      const parsed = JSON.parse(extractJsonBlock(response.text ?? ''));
-      const sources = extractGroundingSources(response);
-      const syncedAt = new Date().toISOString();
-
-      const validStatuses = new Set(['beat', 'inline', 'miss', 'upcoming', 'not_applicable']);
-
-      const earnings = Array.isArray(parsed.earnings)
-        ? parsed.earnings.map((e: Record<string, unknown>, idx: number) => ({
-            id: `live-earn-${Date.now()}-${idx}`,
-            portfolioSymbol:
-              typeof e.portfolioSymbol === 'string'
-                ? e.portfolioSymbol.trim().toUpperCase()
-                : '',
-            reportedSymbol:
-              typeof e.reportedSymbol === 'string'
-                ? e.reportedSymbol.trim().toUpperCase()
-                : '',
-            reportedName: typeof e.reportedName === 'string' ? e.reportedName : '',
-            isTopHolding: Boolean(e.isTopHolding),
-            holdingWeight:
-              typeof e.holdingWeight === 'string' && e.holdingWeight.trim()
-                ? e.holdingWeight.trim()
-                : undefined,
-            flag: typeof e.flag === 'string' ? e.flag : '🌐',
-            reportDate: typeof e.reportDate === 'string' ? e.reportDate : '—',
-            periodLabel: typeof e.periodLabel === 'string' ? e.periodLabel : 'ล่าสุด',
-            revenueSummary: typeof e.revenueSummary === 'string' ? e.revenueSummary : '—',
-            profitSummary: typeof e.profitSummary === 'string' ? e.profitSummary : '—',
-            yoyChange: typeof e.yoyChange === 'string' ? e.yoyChange : undefined,
-            status:
-              typeof e.status === 'string' && validStatuses.has(e.status)
-                ? e.status
-                : 'upcoming',
-            trendSummaryTh: typeof e.trendSummaryTh === 'string' ? e.trendSummaryTh : '',
-            daysUntil: typeof e.daysUntil === 'number' ? Math.round(e.daysUntil) : null,
-            isLiveSynced: true,
-          }))
-        : [];
-
-      const dividends = Array.isArray(parsed.dividends)
-        ? parsed.dividends.map((d: Record<string, unknown>, idx: number) => ({
-            id: `live-div-${Date.now()}-${idx}`,
-            symbol: typeof d.symbol === 'string' ? d.symbol.trim().toUpperCase() : '',
-            name: typeof d.name === 'string' ? d.name : '',
-            flag: typeof d.flag === 'string' ? d.flag : '🌐',
-            applicable: d.applicable !== false,
-            notApplicableReasonTh:
-              d.applicable === false
-                ? typeof d.notApplicableReasonTh === 'string' && d.notApplicableReasonTh.trim()
-                  ? d.notApplicableReasonTh
-                  : 'ไม่มีปันผล / ไม่อิงงบการเงิน'
-                : undefined,
-            xdDate: typeof d.xdDate === 'string' ? d.xdDate : '—',
-            daysUntilXD: typeof d.daysUntilXD === 'number' ? Math.round(d.daysUntilXD) : null,
-            dps: typeof d.dps === 'string' ? d.dps : '—',
-            dividendYield: typeof d.dividendYield === 'string' ? d.dividendYield : '—',
-            payDate: typeof d.payDate === 'string' ? d.payDate : '—',
-            frequency: typeof d.frequency === 'string' ? d.frequency : undefined,
-            noteTh: typeof d.noteTh === 'string' ? d.noteTh : undefined,
-            isLiveSynced: true,
-          }))
-        : [];
+          try {
+            const prompt = buildBatchedInvestCalPrompt(
+              portfolioEntries,
+              rssHeadlines,
+              yahooQuotes,
+              today
+            );
+            const response = await generateJsonWithFallback(ai, prompt);
+            return {
+              ...parseBatchedInvestCalResponse(
+                response.text ?? '',
+                portfolioEntries,
+                rssHeadlines,
+                yahooQuotes,
+                today
+              ),
+              aiCalled: true,
+              rateLimited: false,
+            };
+          } catch (geminiErr) {
+            const formatted = formatServerGeminiError(
+              geminiErr,
+              'ไม่สามารถวิเคราะห์เพิ่มเติมด้วย Gemini ได้ชั่วคราว'
+            );
+            console.warn('[/api/batched-sync] Gemini fallback to public feeds:', formatted.message);
+            return {
+              ...buildPublicOnlyFallbackBatchedResponse(
+                portfolioEntries,
+                rssHeadlines,
+                yahooQuotes,
+                today,
+                formatted.message
+              ),
+              aiCalled: false,
+              rateLimited: formatted.rateLimited,
+            };
+          }
+        }
+      );
 
       res.json({
-        earnings,
-        dividends,
-        sources,
-        syncedAt,
+        ...data,
+        aiCalled: fromServerCache ? false : Boolean(data.aiCalled),
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'ไม่สามารถดึงข้อมูลงบและวัน XD ได้';
-      console.error('[/api/earnings-xd] error:', message);
-      res.status(502).json({
-        error: `ไม่สามารถอัปเดตข้อมูลงบการเงินและวัน XD ได้: ${message}`,
-      });
+      const { status, message, rateLimited, isDailyLimit } = formatServerGeminiError(
+        err,
+        'ไม่สามารถดึงข้อมูลตลาดสดจาก Google News RSS และ Yahoo Finance ได้'
+      );
+      console.error('[/api/batched-sync] error:', message);
+      res.status(status).json({ error: message, rateLimited, isDailyLimit });
     }
   });
 
-  // 4. Social Media Deep Insights Feed (10-15 items across X.com, Facebook, YouTube) via Google Search Grounding
-  app.post('/api/social-insights', async (req, res) => {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      res.status(503).json({
-        error: 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY บนเซิร์ฟเวอร์',
-      });
+  // 3. Historical OHLCV Candles from Yahoo Finance (1D / 4H / 1H — 0% AI Quota)
+  app.post('/api/chart-history', async (req, res) => {
+    const rawSymbol =
+      typeof req.body?.symbol === 'string' ? req.body.symbol.trim().toUpperCase().slice(0, 24) : '';
+    if (!rawSymbol) {
+      res.status(400).json({ error: 'กรุณาระบุตัวย่อสินทรัพย์ (Symbol)' });
       return;
     }
 
-    const portfolioEntries = parsePortfolioPayload(req.body?.portfolio);
-    const focusTickers =
-      portfolioEntries.length > 0
-        ? portfolioEntries.map((p) => `${p.symbol} (${p.category})`).join(', ')
-        : 'QQQM, SMH, BLOK, GLD, SLV, VOO, KCG, PTT, NVDA, BTC';
-
-    const today = getTodayIso();
+    const category =
+      typeof req.body?.category === 'string' ? req.body.category.trim().slice(0, 32) : 'US Stock';
+    const timeframe = parseValidTimeframe(req.body?.timeframe);
+    const cacheKey = `chart-history::${rawSymbol}::${category}::${timeframe}`;
 
     try {
-      const ai = createGeminiClient(apiKey);
-      const prompt = `คุณเป็นบรรณาธิการข่าวการลงทุนและโซเชียลมีเดีย ใช้ Google Search ค้นหากระแสข่าว ประเด็นร้อน บทวิเคราะห์ และมุมมองนักลงทุนล่าสุด ณ วันที่ ${today} จากทั้ง 3 แพลตฟอร์มหลัก ได้แก่ X (x.com), Facebook (เพจวิเคราะห์หุ้น/การลงทุนไทยและต่างประเทศ) และ YouTube (ช่องหุ้น เศรษฐกิจ ETF และคริปโต) ที่เกี่ยวข้องกับสินทรัพย์ต่อไปนี้: ${focusTickers} และภาพรวมเศรษฐกิจโลก
-
-กรุณาสรุปเป็น JSON เพียงอย่างเดียวจำนวน 12 รายการ (แบ่งสัดส่วนครบทั้ง x, facebook และ youtube แพลตฟอร์มละ 4 รายการ) ตามโครงสร้างต่อไปนี้:
-{
-  "items": [
-    {
-      "platform": "<x | facebook | youtube>",
-      "channelName": "<ชื่อบัญชี/เพจ/ช่อง YouTube เช่น @KobeissiLetter, ลงทุนแมน, Finnomena, THE STANDARD WEALTH, SemiAnalysis>",
-      "handleOrPage": "<ชื่อ Handle หรือป้ายช่อง เช่น @KobeissiLetter หรือ Facebook · Finnomena หรือ YouTube · ลงทุนแมน>",
-      "timeLabel": "<เวลาอัปเดต เช่น 30 นาทีที่แล้ว, 2 ชม. ที่แล้ว, วันนี้>",
-      "title": "<หัวข้อประเด็นร้อนภาษาไทยที่ดึงดูดและชัดเจน>",
-      "deepSummaryTh": "<บทสรุปเชิงลึก 2-3 ประโยคภาษาไทย อธิบายประเด็นสำคัญ ตัวเลข หรือข้อมูลที่มีการถกเถียง>",
-      "analystViewTh": "<มุมมองนักวิเคราะห์/เพจ/ช่อง 1-2 ประโยคว่าควรวางแผนหรือจับตาจุดใด>",
-      "sentiment": "<bullish | bearish | watch>",
-      "relatedAssets": ["<Ticker ที่เกี่ยวข้อง เช่น QQQM, SMH, GLD, KCG>"],
-      "countryFlag": "<อีโมจิธงชาติ เช่น 🇺🇸 🇹🇭 🇨🇳 🇯🇵 🌐>",
-      "sourceUrl": "<URL จริงจากผลการค้นหาถ้ามี หรือเว้นว่าง>",
-      "searchQuery": "<คำค้นหาสั้นๆ สำหรับค้นหาประเด็นนี้ต่อบนแพลตฟอร์ม>"
+      const { data } = await withServerCacheAndDedup(
+        cacheKey,
+        CHART_HISTORY_CACHE_TTL_MS,
+        Boolean(req.body?.force),
+        () => fetchYahooHistoricalCandles(rawSymbol, category, timeframe, false)
+      );
+      res.json(data);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : 'ไม่สามารถดึงข้อมูลแท่งเทียนย้อนหลังจาก Yahoo Finance ได้';
+      res.status(502).json({ error: msg });
     }
-  ]
-}
+  });
 
-เงื่อนไขสำคัญ:
-- สร้าง items จำนวน 12 รายการ (10-15 รายการ) กระจายครบทั้ง X.com, Facebook และ YouTube
-- เน้นความสดใหม่และเชื่อมโยงโดยตรงกับสินทรัพย์ในพอร์ตของผู้ใช้ (${focusTickers})
-- ใช้ภาษาไทยที่คมชัดระดับมืออาชีพ
-- ตอบกลับเป็น JSON ที่ถูกต้องตาม syntax เท่านั้น`;
+  // 4. On-Demand AI Technical, Elliott Wave & Entry/TP/SL Analysis (1 Single Request, NO googleSearch)
+  app.post('/api/analyze-chart', async (req, res) => {
+    const symbol =
+      typeof req.body?.symbol === 'string' ? req.body.symbol.trim().toUpperCase().slice(0, 24) : '';
+    const latestPrice = Number(req.body?.latestPrice);
+    if (!symbol || !Number.isFinite(latestPrice) || latestPrice <= 0) {
+      res.status(400).json({ error: 'ข้อมูลราคาล่าสุดไม่ครบถ้วนสำหรับวิเคราะห์กราฟเทคนิค' });
+      return;
+    }
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: prompt,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          tools: [{ googleSearch: {} }],
-        },
-      });
+    const timeframe = parseValidTimeframe(req.body?.timeframe);
+    const name =
+      typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 120) : symbol;
+    const category =
+      typeof req.body?.category === 'string' ? req.body.category.trim().slice(0, 40) : 'US Stock';
+    const currency =
+      typeof req.body?.currency === 'string' ? req.body.currency.trim().toUpperCase().slice(0, 10) : 'USD';
+    const support1 = Number(req.body?.support1) || latestPrice * 0.97;
+    const support2 = Number(req.body?.support2) || latestPrice * 0.93;
+    const resistance1 = Number(req.body?.resistance1) || latestPrice * 1.03;
+    const resistance2 = Number(req.body?.resistance2) || latestPrice * 1.07;
+    const wavePattern =
+      typeof req.body?.wavePattern === 'string' ? req.body.wavePattern.slice(0, 30) : 'insufficient';
+    const waveDirection =
+      typeof req.body?.waveDirection === 'string' ? req.body.waveDirection.slice(0, 20) : 'sideway';
+    const averageCost =
+      typeof req.body?.averageCost === 'number' &&
+      Number.isFinite(req.body.averageCost) &&
+      req.body.averageCost > 0
+        ? req.body.averageCost
+        : undefined;
+    const quantity =
+      typeof req.body?.quantity === 'number' &&
+      Number.isFinite(req.body.quantity) &&
+      req.body.quantity > 0
+        ? req.body.quantity
+        : undefined;
 
-      const parsed = JSON.parse(extractJsonBlock(response.text ?? ''));
-      const sources = extractGroundingSources(response);
-      const syncedAt = new Date().toISOString();
+    const wavePoints: WavePoint[] = Array.isArray(req.body?.wavePoints)
+      ? req.body.wavePoints
+          .filter(
+            (w: unknown): w is Record<string, unknown> =>
+              Boolean(w) && typeof w === 'object' && typeof (w as Record<string, unknown>).price === 'number'
+          )
+          .slice(0, 8)
+          .map((w: Record<string, unknown>) => ({
+            candleIndex: Number(w.candleIndex) || 0,
+            timestamp: Number(w.timestamp) || 0,
+            price: Number(w.price),
+            type: w.type === 'high' ? 'high' : 'low',
+            label: typeof w.label === 'string' ? w.label.slice(0, 8) : '',
+          }))
+      : [];
 
-      const items = Array.isArray(parsed.items)
-        ? parsed.items
-            .map((it: Record<string, unknown>, idx: number) => {
-              const rawPlat = String(it.platform || '').toLowerCase();
-              const platform =
-                rawPlat === 'facebook' || rawPlat === 'youtube' ? rawPlat : 'x';
-              const rawSent = String(it.sentiment || '').toLowerCase();
-              const sentiment =
-                rawSent === 'bullish' || rawSent === 'bearish' ? rawSent : 'watch';
-              const rawUrl = typeof it.sourceUrl === 'string' ? it.sourceUrl.trim() : '';
-              const safeUrl =
-                rawUrl.startsWith('https://') || rawUrl.startsWith('http://')
-                  ? rawUrl
-                  : undefined;
+    const costSig = averageCost ? averageCost.toFixed(2) : 'none';
+    const cacheKey = `chart-ai::${symbol}::${timeframe}::${costSig}`;
 
-              return {
-                id: `live-soc-${Date.now()}-${idx}`,
-                platform,
-                channelName:
-                  typeof it.channelName === 'string' && it.channelName.trim()
-                    ? it.channelName.trim().slice(0, 80)
-                    : platform === 'x'
-                    ? 'X Market Analyst'
-                    : platform === 'facebook'
-                    ? 'เพจวิเคราะห์การลงทุน'
-                    : 'YouTube Finance Channel',
-                handleOrPage:
-                  typeof it.handleOrPage === 'string' && it.handleOrPage.trim()
-                    ? it.handleOrPage.trim().slice(0, 80)
-                    : platform.toUpperCase(),
-                timeLabel: typeof it.timeLabel === 'string' ? it.timeLabel : 'ล่าสุดวันนี้',
-                title: typeof it.title === 'string' ? it.title.trim() : '',
-                deepSummaryTh:
-                  typeof it.deepSummaryTh === 'string' ? it.deepSummaryTh.trim() : '',
-                analystViewTh:
-                  typeof it.analystViewTh === 'string' ? it.analystViewTh.trim() : '',
-                sentiment,
-                relatedAssets: Array.isArray(it.relatedAssets)
-                  ? it.relatedAssets
-                      .filter((x): x is string => typeof x === 'string')
-                      .map((x) => x.trim().toUpperCase())
-                  : [],
-                countryFlag: typeof it.countryFlag === 'string' ? it.countryFlag : '🌐',
-                sourceUrl: safeUrl,
-                searchQuery:
-                  typeof it.searchQuery === 'string' && it.searchQuery.trim()
-                    ? it.searchQuery.trim()
-                    : undefined,
-                isLiveSynced: true,
-              };
-            })
-            .filter((x: { title: string }) => x.title.length > 0)
-        : [];
+    try {
+      const ai = createGeminiClient();
+      if (!ai) {
+        res.status(503).json({
+          error: 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY บนเซิร์ฟเวอร์ กรุณาตรวจสอบใน Settings > Secrets',
+          rateLimited: false,
+        });
+        return;
+      }
+
+      const { data, fromServerCache } = await withServerCacheAndDedup(
+        cacheKey,
+        CHART_ANALYSIS_CACHE_TTL_MS,
+        Boolean(req.body?.force),
+        async () => {
+          const prompt = buildChartTechnicalPrompt({
+            symbol,
+            name,
+            category,
+            currency,
+            timeframe,
+            latestPrice,
+            support1,
+            support2,
+            resistance1,
+            resistance2,
+            wavePattern,
+            waveDirection,
+            wavePoints,
+            averageCost,
+            quantity,
+          });
+          const response = await generateJsonWithFallback(ai, prompt);
+          return parseChartTechnicalResponse(response.text ?? '', symbol, timeframe);
+        }
+      );
 
       res.json({
-        items,
-        sources,
-        syncedAt,
+        ...data,
+        aiCalled: fromServerCache ? false : true,
       });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'ไม่สามารถดึงฟีดโซเชียลได้';
-      console.error('[/api/social-insights] error:', message);
-      res.status(502).json({
-        error: `ไม่สามารถอัปเดตฟีดข่าวโซเชียลได้ในขณะนี้: ${message}`,
-      });
+      const { status, message, rateLimited, isDailyLimit } = formatServerGeminiError(
+        err,
+        'ไม่สามารถวิเคราะห์กราฟเทคนิคและคลื่น Elliott Wave ด้วย AI ได้'
+      );
+      if (status === 429) {
+        console.warn('[/api/analyze-chart] rate-limited:', message);
+      } else {
+        console.error('[/api/analyze-chart] error:', message);
+      }
+      res.status(status).json({ error: message, rateLimited, isDailyLimit });
     }
   });
 
@@ -824,11 +596,10 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`InvestCal server running on http://0.0.0.0:${PORT}`);
+    console.log(
+      `InvestCal server running on http://0.0.0.0:${PORT} (${activeServerModel}, Free RSS + Yahoo OHLCV + Batched/On-Demand Gemini)`
+    );
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start InvestCal server:', err);
-  process.exit(1);
-});
+startServer();

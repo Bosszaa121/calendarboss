@@ -71,6 +71,8 @@ export interface PortfolioAsset {
   topHoldings?: string[];
   hasDividends?: boolean;
   hasEarnings?: boolean;
+  averageCost?: number;
+  quantity?: number;
   addedAt: string;
 }
 
@@ -139,18 +141,27 @@ export interface EarningsRecord {
   isLiveSynced?: boolean;
 }
 
+export type XDStatus = 'announced' | 'unannounced' | 'not_applicable';
+
 export interface DividendXDRecord {
   id: string;
   symbol: string;
   name: string;
   flag: string;
   applicable: boolean;
+  xdStatus: XDStatus;
   notApplicableReasonTh?: string;
+  /** Official upcoming XD date (YYYY-MM-DD) ONLY when xdStatus === 'announced'; otherwise '—' */
   xdDate: string;
+  /** Strictly computed from today -> xdDate ONLY when xdStatus === 'announced'; otherwise null */
   daysUntilXD: number | null;
   dps: string;
   dividendYield: string;
   payDate: string;
+  /** Most recent historical paid dividend info (shown when next XD is unannounced) */
+  lastPaidXdDate?: string;
+  lastPaidDps?: string;
+  lastPaidPayDate?: string;
   frequency?: string;
   noteTh?: string;
   sourceUrl?: string;
@@ -200,6 +211,22 @@ export interface FearGreedData {
   marketNote: string;
 }
 
+export interface LiveAssetQuote {
+  symbol: string;
+  yahooSymbol: string;
+  name?: string;
+  price: number | null;
+  previousClose?: number | null;
+  changePercent: number | null;
+  currency: string;
+  dividendYield?: string;
+  lastPaidXdDate?: string;
+  lastPaidDps?: string;
+  upcomingXdDate?: string;
+  earningsDate?: string;
+  updatedAt: string;
+}
+
 export interface SyncSource {
   title: string;
   uri: string;
@@ -211,6 +238,22 @@ export interface SyncResponse {
   fearGreed?: Partial<FearGreedData>;
   sources: SyncSource[];
   syncedAt: string;
+}
+
+export interface BatchedSyncResponse {
+  calendarEvents: CalendarEvent[];
+  newsItems: NewsItem[];
+  fearGreed?: Partial<FearGreedData>;
+  earnings: EarningsRecord[];
+  dividends: DividendXDRecord[];
+  socialInsights: SocialInsightItem[];
+  quotes: Record<string, LiveAssetQuote>;
+  sources: SyncSource[];
+  syncedAt: string;
+  rssCount?: number;
+  aiWarning?: string;
+  aiCalled?: boolean;
+  rateLimited?: boolean;
 }
 
 export interface LocalUserAccount {
@@ -236,4 +279,99 @@ export interface AppAlert {
   targetNewsSubTab?: NewsSubTab;
   badgeLabel: string;
   createdAt: string;
+}
+
+export type ChartTimeframe = '1D' | '4H' | '1H';
+
+export interface ChartCandle {
+  timestamp: number;
+  label: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface ChartHistoryResponse {
+  symbol: string;
+  yahooSymbol: string;
+  timeframe: ChartTimeframe;
+  currency: string;
+  latestPrice: number | null;
+  previousClose: number | null;
+  changePercent: number | null;
+  candles: ChartCandle[];
+  fetchedAt: string;
+}
+
+export interface WavePoint {
+  candleIndex: number;
+  timestamp: number;
+  price: number;
+  type: 'high' | 'low';
+  label: string;
+}
+
+export interface TechnicalStructureResult {
+  latestPrice: number;
+  support1: number;
+  support2: number;
+  resistance1: number;
+  resistance2: number;
+  pivot: number;
+  wavePattern: 'impulse' | 'correction' | 'insufficient';
+  waveDirection: 'up' | 'down' | 'sideway';
+  wavePoints: WavePoint[];
+  breakevenDeltaAbs: number | null;
+  breakevenDeltaPct: number | null;
+}
+
+export type ChartTrendDirection = 'Uptrend' | 'Downtrend' | 'Sideway';
+
+export interface ChartAiAnalysisResponse {
+  symbol: string;
+  timeframe: ChartTimeframe;
+  trend: ChartTrendDirection;
+  trendTh: string;
+  waveStatusTh: string;
+  invalidationLevel: string;
+  nextWaveTarget: string;
+  buyDcaZone: string;
+  takeProfitZone: string;
+  stopLossLevel: string;
+  breakevenAdviceTh: string;
+  summaryTh: string;
+  analyzedAt: string;
+  fromCache?: boolean;
+  aiCalled?: boolean;
+  rateLimited?: boolean;
+}
+
+export interface ChartTargetAsset {
+  symbol: string;
+  name: string;
+  category: AssetCategory;
+  market: string;
+  flag: string;
+  currency: string;
+  sector?: string;
+  averageCost?: number;
+  quantity?: number;
+  portfolioId?: string;
+}
+
+export interface QuotaSnapshot {
+  pacificDateKey: string;
+  dailyUsed: number;
+  dailyLimit: number;
+  dailyPercent: number;
+  minuteUsed: number;
+  minuteLimit: number;
+  cooldownSecondsLeft: number;
+  isCoolingDown: boolean;
+  dailyExhausted: boolean;
+  tone: 'normal' | 'warning' | 'danger';
+  lastSourceMode: 'cache' | 'live';
+  resetCountdownLabel: string;
 }

@@ -100,7 +100,7 @@ export function buildInvestorAlerts(params: {
   earningsRecords: EarningsRecord[];
   dividendRecords: DividendXDRecord[];
   socialInsights: SocialInsightItem[];
-  fearGreed: FearGreedData;
+  fearGreed: FearGreedData | null;
 }): AppAlert[] {
   const {
     portfolio,
@@ -119,7 +119,7 @@ export function buildInvestorAlerts(params: {
   // ------------------------------------------------------------------
   // 4. 🚨 Risk Warning Alerts (works globally + intensifies for portfolio)
   // ------------------------------------------------------------------
-  if (fearGreed.value <= 25) {
+  if (fearGreed && fearGreed.value <= 25) {
     alerts.push({
       id: `risk-fg-fear-${fearGreed.value}`,
       category: 'risk_warning',
@@ -131,7 +131,7 @@ export function buildInvestorAlerts(params: {
       badgeLabel: 'คำเตือนความเสี่ยง',
       createdAt: nowIso,
     });
-  } else if (fearGreed.value >= 75) {
+  } else if (fearGreed && fearGreed.value >= 75) {
     alerts.push({
       id: `risk-fg-greed-${fearGreed.value}`,
       category: 'risk_warning',
@@ -335,7 +335,7 @@ export function buildInvestorAlerts(params: {
   // ------------------------------------------------------------------
   const seenXdSymbols = new Set<string>();
   for (const div of dividendRecords) {
-    if (!div.applicable) continue;
+    if (!div.applicable || div.xdStatus !== 'announced') continue;
     const diff =
       typeof div.daysUntilXD === 'number'
         ? div.daysUntilXD

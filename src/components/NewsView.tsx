@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  AlertCircle,
   AlertTriangle,
   ExternalLink,
   Globe,
@@ -32,6 +33,7 @@ import {
   PortfolioMatchBadge,
   SentimentIndicator,
 } from './ImpactRating';
+import { LiveSearchingBanner, NewsCardsSkeleton } from './LoadingSkeletons';
 
 interface NewsViewProps {
   subTab: NewsSubTab;
@@ -46,7 +48,11 @@ interface NewsViewProps {
   onSearchQueryChange: (q: string) => void;
   sources: SyncSource[];
   socialSources: SyncSource[];
+  isLoadingNews: boolean;
+  newsError: string | null;
+  onRetryMarket: () => void;
   isSyncingSocial: boolean;
+  socialError: string | null;
   lastSocialSyncAt: string | null;
   onSyncSocialLive: () => void;
   onGoToPortfolio: () => void;
@@ -140,7 +146,11 @@ export function NewsView({
   onSearchQueryChange,
   sources,
   socialSources,
+  isLoadingNews,
+  newsError,
+  onRetryMarket,
   isSyncingSocial,
+  socialError,
   lastSocialSyncAt,
   onSyncSocialLive,
   onGoToPortfolio,
@@ -496,8 +506,29 @@ export function NewsView({
 
       {/* BODY CONTENT */}
       {subTab === 'global' ? (
-        <section className="bg-[#10151E] border border-[#1E2634] rounded-xl overflow-hidden">
-          {filteredNews.length === 0 ? (
+        <div className="space-y-4">
+          {isLoadingNews && (
+            <LiveSearchingBanner message="กำลังค้นหาข่าวเศรษฐกิจและการลงทุนจริงล่าสุดจาก Google Search..." />
+          )}
+          <section className="bg-[#10151E] border border-[#1E2634] rounded-xl overflow-hidden">
+            {isLoadingNews && newsItems.length === 0 ? (
+              <div className="p-4 sm:p-5">
+                <NewsCardsSkeleton cards={4} />
+              </div>
+            ) : !isLoadingNews && newsError && newsItems.length === 0 ? (
+              <div className="py-14 px-6 text-center space-y-3">
+                <AlertCircle className="w-6 h-6 text-rose-400 mx-auto" />
+                <p className="text-sm font-medium text-rose-200 max-w-lg mx-auto">{newsError}</p>
+                <button
+                  type="button"
+                  onClick={onRetryMarket}
+                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>ลองค้นหาข่าวใหม่</span>
+                </button>
+              </div>
+            ) : filteredNews.length === 0 ? (
             <div className="py-14 px-6 text-center space-y-3">
               {onlyPortfolio && portfolio.length === 0 ? (
                 <>
@@ -705,10 +736,47 @@ export function NewsView({
             </>
           )}
         </section>
+        </div>
       ) : (
         /* Social Media Deep Insights Grid (10-15 items across X.com, Facebook, YouTube) */
         <section className="space-y-4">
-          {filteredSocial.length === 0 ? (
+          {isSyncingSocial && (
+            <LiveSearchingBanner message="กำลังค้นหากระแสข่าวและบทวิเคราะห์เจาะลึกจาก X.com, Facebook และ YouTube ผ่าน Google Search..." />
+          )}
+
+          {isSyncingSocial && socialInsights.length === 0 ? (
+            <NewsCardsSkeleton cards={4} />
+          ) : !isSyncingSocial && socialError && socialInsights.length === 0 ? (
+            <div className="bg-[#10151E] border border-[#1E2634] rounded-xl py-14 px-6 text-center space-y-3">
+              <AlertCircle className="w-6 h-6 text-rose-400 mx-auto" />
+              <p className="text-sm font-medium text-rose-200 max-w-lg mx-auto">{socialError}</p>
+              <button
+                type="button"
+                onClick={onSyncSocialLive}
+                className="px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>ลองค้นหาฟีดโซเชียลอีกครั้ง</span>
+              </button>
+            </div>
+          ) : socialInsights.length === 0 ? (
+            <div className="bg-[#10151E] border border-[#1E2634] rounded-xl py-14 px-6 text-center space-y-3">
+              <p className="text-sm text-slate-200 font-medium">
+                ยังไม่มีฟีดข่าวโซเชียลในแคช
+              </p>
+              <p className="text-xs text-slate-400">
+                กดปุ่มด้านล่างเพื่อค้นหากระแสวิเคราะห์เจาะลึกจริงจาก X.com, Facebook และ YouTube ผ่าน Google Search
+              </p>
+              <button
+                type="button"
+                onClick={onSyncSocialLive}
+                className="px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>ค้นหาฟีดโซเชียลสด (Google Search)</span>
+              </button>
+            </div>
+          ) : filteredSocial.length === 0 ? (
             <div className="bg-[#10151E] border border-[#1E2634] rounded-xl py-14 px-6 text-center space-y-3">
               <p className="text-sm text-slate-300 font-medium">
                 ไม่พบประเด็นโซเชียลตามตัวกรองที่เลือก

@@ -1,5 +1,14 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronDown, ChevronUp, Filter, Plus, RotateCcw } from 'lucide-react';
+import {
+  AlertCircle,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+  Filter,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+} from 'lucide-react';
 import {
   AssetDirectionForecast,
   CalendarEvent,
@@ -8,6 +17,7 @@ import {
   ImpactLevel,
   PortfolioAsset,
   PortfolioImpactDetail,
+  SyncSource,
 } from '../types';
 import {
   analyzePortfolioImpacts,
@@ -21,6 +31,7 @@ import {
   PortfolioImpactMatrix,
   PortfolioMatchBadge,
 } from './ImpactRating';
+import { CalendarRowsSkeleton, LiveSearchingBanner } from './LoadingSkeletons';
 
 interface CalendarViewProps {
   events: CalendarEvent[];
@@ -30,6 +41,10 @@ interface CalendarViewProps {
   onToggleOnlyPortfolio: (val: boolean) => void;
   onAssetTagClick: (symbol: string) => void;
   onGoToPortfolio: () => void;
+  isLoading: boolean;
+  error: string | null;
+  sources: SyncSource[];
+  onRetrySync: () => void;
 }
 
 const DATE_TABS: Array<{ key: DateTabKey; label: string }> = [
@@ -65,8 +80,12 @@ export function CalendarView({
   onToggleOnlyPortfolio,
   onAssetTagClick,
   onGoToPortfolio,
+  isLoading,
+  error,
+  sources,
+  onRetrySync,
 }: CalendarViewProps) {
-  const [dateTab, setDateTab] = useState<DateTabKey>('today');
+  const [dateTab, setDateTab] = useState<DateTabKey>('this_week');
   const [impactFilter, setImpactFilter] = useState<'ALL' | ImpactLevel>('ALL');
   const [categoryFilter, setCategoryFilter] = useState<'ALL' | EventCategory>('ALL');
   const [countryFilter, setCountryFilter] = useState<string>('ALL');
@@ -324,9 +343,29 @@ export function CalendarView({
         </div>
       </section>
 
+      {/* Live Loading Banner */}
+      {isLoading && (
+        <LiveSearchingBanner message="กำลังค้นหาปฏิทินเศรษฐกิจจริงล่าสุดจาก Google Search Grounding..." />
+      )}
+
       {/* Main Calendar Table & Mobile Cards */}
       <section className="bg-[#10151E] border border-[#1E2634] rounded-xl overflow-hidden">
-        {filteredEvents.length === 0 ? (
+        {isLoading && events.length === 0 ? (
+          <CalendarRowsSkeleton rows={7} />
+        ) : !isLoading && error && events.length === 0 ? (
+          <div className="py-14 px-6 text-center space-y-3">
+            <AlertCircle className="w-6 h-6 text-rose-400 mx-auto" />
+            <p className="text-sm font-medium text-rose-200 max-w-lg mx-auto">{error}</p>
+            <button
+              type="button"
+              onClick={onRetrySync}
+              className="px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>ลองค้นหาข้อมูลจริงอีกครั้ง</span>
+            </button>
+          </div>
+        ) : filteredEvents.length === 0 ? (
           <div className="py-14 px-6 text-center space-y-3">
             {onlyPortfolio && portfolio.length === 0 ? (
               <>
@@ -693,6 +732,29 @@ export function CalendarView({
           </>
         )}
       </section>
+
+      {/* Grounding Sources */}
+      {sources.length > 0 && (
+        <section className="bg-[#10151E] border border-[#1E2634] rounded-xl p-4">
+          <h3 className="text-xs font-semibold text-slate-300 mb-2">
+            แหล่งอ้างอิงปฏิทินเศรษฐกิจจริง (Google Search Grounding)
+          </h3>
+          <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+            {sources.map((src) => (
+              <a
+                key={src.uri}
+                href={src.uri}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-sky-400 hover:text-sky-300 hover:underline max-w-xs truncate"
+              >
+                <span className="truncate">{src.title}</span>
+                <ExternalLink className="w-3 h-3 shrink-0" />
+              </a>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
