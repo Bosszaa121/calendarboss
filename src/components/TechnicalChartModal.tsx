@@ -3,8 +3,10 @@ import {
   Activity,
   AlertCircle,
   BarChart2,
+  BarChart3,
   Clock,
   Crosshair,
+  ExternalLink,
   Loader2,
   RefreshCw,
   Shield,
@@ -24,8 +26,13 @@ import {
   QuotaSnapshot,
 } from '../types';
 import {
+  computeEmaSeries,
   computeTechnicalStructure,
+  formatCompactVolume,
   formatCurrencyPrice,
+  getCleanSetSymbol,
+  getTradingViewExternalUrl,
+  isThaiStockAsset,
   toTradingViewSymbol,
 } from '../utils/technicalAnalysis';
 import {
@@ -42,11 +49,17 @@ interface TechnicalChartModalProps {
 }
 
 /**
- * TradingView Advanced Real-Time Chart Widget (Dark Theme)
- * Full left drawing toolbar (Trendline, Horizontal Line, Fibonacci, Elliott Wave)
- * + default indicators (RSI, Bollinger Bands, Stochastic, EMA). Uses 0% AI quota.
+ * Clean TradingView Advanced Real-Time Chart Widget (Dark Theme)
+ * Main candlesticks + Volume only (uncluttered canvas; users can add RSI / BB / Stochastic via top toolbar)
+ * with left drawing toolbar open. Always remounted via key={tvSymbol}. Uses 0% AI quota.
  */
-function TradingViewWidgetPanel({ tvSymbol }: { tvSymbol: string }) {
+function TradingViewWidgetPanel({
+  tvSymbol,
+  externalUrl,
+}: {
+  tvSymbol: string;
+  externalUrl: string;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -79,14 +92,9 @@ function TradingViewWidgetPanel({ tvSymbol }: { tvSymbol: string }) {
       allow_symbol_change: true,
       hide_side_toolbar: false,
       hide_top_toolbar: false,
+      hide_volume: false,
       save_image: true,
       calendar: false,
-      studies: [
-        'STD;RSI',
-        'STD;Bollinger_Bands',
-        'STD;Stochastic',
-        'STD;EMA',
-      ],
       support_host: 'https://www.tradingview.com',
     });
 
@@ -98,35 +106,47 @@ function TradingViewWidgetPanel({ tvSymbol }: { tvSymbol: string }) {
   }, [tvSymbol]);
 
   return (
-    <div className="space-y-2">
+    <div className="space-y-2.5">
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
         <span>
           รหัสตลาด TradingView:{' '}
-          <strong className="font-mono text-amber-300">{tvSymbol}</strong> · เปิดแถบเครื่องมือวาดเส้นด้านซ้ายครบชุด (Trendline, Horizontal Line, Fibonacci, Elliott Wave)
+          <strong className="font-mono text-amber-300">{tvSymbol}</strong>
+          <span className="mx-1.5 text-slate-600" aria-hidden="true">·</span>
+          แท่งเทียนหลัก + Volume (เพิ่ม RSI / Bollinger Bands / Stochastic ได้จากปุ่ม Indicators ด้านบนกราฟ)
         </span>
-        <span className="text-[11px] text-emerald-400 font-medium">
-          อินดิเคเตอร์: RSI · BB · Stochastic · EMA (โควตา AI 0%)
-        </span>
+        <a
+          href={externalUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-xs font-medium text-sky-300 hover:text-sky-200 whitespace-nowrap transition-colors"
+        >
+          <span>เปิดเต็มจอบน TradingView</span>
+          <ExternalLink className="w-3.5 h-3.5" />
+        </a>
       </div>
       <div
         ref={containerRef}
-        className="tradingview-widget-container w-full h-[500px] sm:h-[540px] rounded-lg overflow-hidden border border-[#1E2634] bg-[#090C11]"
+        className="tradingview-widget-container w-full min-h-[520px] h-[58vh] rounded-lg overflow-hidden border border-[#1E2634] bg-[#090C11]"
       />
     </div>
   );
 }
 
 /**
- * Interactive Mathematical Price Structure & Preliminary Elliott Wave SVG Chart (0% AI Quota).
+ * Interactive Full-Height Real Candlestick, Volume, EMA 20/50, Breakeven & Preliminary Elliott Wave SVG Chart (0% AI Quota).
  */
 function InteractiveStructureSvgChart({
   history,
   averageCost,
   showElliottWave,
+  showEma,
+  showVolume,
 }: {
   history: ChartHistoryResponse;
   averageCost?: number;
   showElliottWave: boolean;
+  showEma: boolean;
+  showVolume: boolean;
 }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const candles = history.candles;
@@ -137,28 +157,52 @@ function InteractiveStructureSvgChart({
     [candles, history.timeframe, averageCost]
   );
 
-  const width = 920;
-  const height = 400;
+  const ema20 = useMemo(() => computeEmaSeries(candles, 20), [candles]);
+  const ema50 = useMemo(() => computeEmaSeries(candles, 50), [candles]);
+
+  const width = 1120;
+  const height = 560;
   const padTop = 26;
   const padBottom = 34;
   const padLeft = 14;
-  const padRight = 92;
+  const padRight = 98;
   const plotW = width - padLeft - padRight;
-  const plotH = height - padTop - padBottom;
 
-  const { minPrice, maxPrice } = useMemo(() => {
+  // Allocate clean sub-pane for Volume bars when enabled
+  const volAreaH = showVolume ? 88 : 0;
+  const volGap = showVolume ? 14 : 0;
+  const pricePlotH = height - padTop - padBottom - volAreaH - volGap;
+  const volTopY = padTop + pricePlotH + volGap;
+  const volBottomY = height - padBottom;
+
+  const { minPrice, maxPrice, maxVolume } = useMemo(() => {
     let min = Infinity;
     let max = -Infinity;
-    for (const c of candles) {
+    let maxVol = 0;
+
+    for (let i = 0; i < candles.length; i++) {
+      const c = candles[i];
       if (c.low < min) min = c.low;
       if (c.high > max) max = c.high;
+      if (c.volume > maxVol) maxVol = c.volume;
+      if (showEma) {
+        const e20 = ema20[i];
+        const e50 = ema50[i];
+        if (e20 !== null) {
+          if (e20 < min) min = e20;
+          if (e20 > max) max = e20;
+        }
+        if (e50 !== null) {
+          if (e50 < min) min = e50;
+          if (e50 > max) max = e50;
+        }
+      }
     }
     if (structure) {
       min = Math.min(min, structure.support2);
       max = Math.max(max, structure.resistance2);
     }
     if (typeof averageCost === 'number' && averageCost > 0) {
-      // Keep Breakeven visible if within +/- 35% of range
       if (averageCost >= min * 0.65 && averageCost <= max * 1.35) {
         min = Math.min(min, averageCost);
         max = Math.max(max, averageCost);
@@ -166,19 +210,20 @@ function InteractiveStructureSvgChart({
     }
     const span = Math.max(max - min, 0.0001);
     return {
-      minPrice: min - span * 0.08,
-      maxPrice: max + span * 0.08,
+      minPrice: min - span * 0.07,
+      maxPrice: max + span * 0.07,
+      maxVolume: Math.max(maxVol, 1),
     };
-  }, [candles, structure, averageCost]);
+  }, [candles, structure, averageCost, showEma, ema20, ema50]);
 
   const priceSpan = Math.max(maxPrice - minPrice, 0.0001);
-  const yOf = (price: number) => padTop + ((maxPrice - price) / priceSpan) * plotH;
+  const yOf = (price: number) => padTop + ((maxPrice - price) / priceSpan) * pricePlotH;
   const stepX = plotW / Math.max(candles.length, 1);
   const xOf = (idx: number) => padLeft + idx * stepX + stepX / 2;
-  const candleBodyW = Math.max(2, Math.min(9, stepX * 0.62));
+  const candleBodyW = Math.max(2.5, Math.min(10, stepX * 0.64));
 
   const gridTicks = useMemo(() => {
-    const count = 5;
+    const count = 6;
     const ticks: number[] = [];
     for (let i = 0; i <= count; i++) {
       ticks.push(minPrice + (priceSpan * i) / count);
@@ -186,6 +231,10 @@ function InteractiveStructureSvgChart({
     return ticks;
   }, [minPrice, priceSpan]);
 
+  const activeIdx = hoverIndex !== null ? hoverIndex : candles.length - 1;
+  const activeCandle = activeIdx >= 0 ? candles[activeIdx] ?? null : null;
+  const activeEma20 = activeIdx >= 0 ? ema20[activeIdx] ?? null : null;
+  const activeEma50 = activeIdx >= 0 ? ema50[activeIdx] ?? null : null;
   const hoveredCandle = hoverIndex !== null ? candles[hoverIndex] ?? null : null;
 
   const horizontalLevels = useMemo(() => {
@@ -251,56 +300,87 @@ function InteractiveStructureSvgChart({
         textFill: '#FEF3C7',
         badgeBg: '#78350F',
         dash: '6 3',
-        width: 2,
+        width: 2.1,
       });
     }
 
     return list.filter((lv) => lv.price >= minPrice && lv.price <= maxPrice);
   }, [structure, averageCost, minPrice, maxPrice]);
 
+  const ema20Points = useMemo(() => {
+    if (!showEma) return '';
+    return ema20
+      .map((val, idx) => (val !== null ? `${xOf(idx).toFixed(1)},${yOf(val).toFixed(1)}` : null))
+      .filter((p): p is string => Boolean(p))
+      .join(' ');
+  }, [showEma, ema20, candles.length, minPrice, maxPrice, pricePlotH]);
+
+  const ema50Points = useMemo(() => {
+    if (!showEma) return '';
+    return ema50
+      .map((val, idx) => (val !== null ? `${xOf(idx).toFixed(1)},${yOf(val).toFixed(1)}` : null))
+      .filter((p): p is string => Boolean(p))
+      .join(' ');
+  }, [showEma, ema50, candles.length, minPrice, maxPrice, pricePlotH]);
+
   const wavePolylinePoints = useMemo(() => {
     if (!showElliottWave || !structure || structure.wavePoints.length < 2) return '';
     return structure.wavePoints
       .map((wp) => `${xOf(wp.candleIndex).toFixed(1)},${yOf(wp.price).toFixed(1)}`)
       .join(' ');
-  }, [showElliottWave, structure, candles.length, minPrice, maxPrice]);
+  }, [showElliottWave, structure, candles.length, minPrice, maxPrice, pricePlotH]);
 
   return (
     <div className="space-y-3">
-      {/* Hover Readout Strip */}
-      <div className="flex flex-wrap items-center justify-between gap-2 text-xs px-3 py-2 rounded-lg bg-[#090C11] border border-[#1E2634]">
-        {hoveredCandle ? (
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono tabular-nums text-[11px]">
-            <span className="text-slate-300 font-sans font-medium">{hoveredCandle.label}</span>
-            <span className="text-slate-400">
-              O: <strong className="text-slate-100">{formatCurrencyPrice(hoveredCandle.open, currency)}</strong>
+      {/* Live OHLCV + EMA Readout Strip */}
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs px-3.5 py-2.5 rounded-lg bg-[#090C11] border border-[#1E2634]">
+        {activeCandle ? (
+          <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 font-mono tabular-nums text-[11px]">
+            <span className="text-slate-300 font-sans font-medium inline-flex items-center gap-1.5">
+              <Crosshair className="w-3.5 h-3.5 text-slate-500" />
+              {hoveredCandle ? activeCandle.label : `ล่าสุด (${activeCandle.label})`}
             </span>
             <span className="text-slate-400">
-              H: <strong className="text-emerald-300">{formatCurrencyPrice(hoveredCandle.high, currency)}</strong>
+              O: <strong className="text-slate-100">{formatCurrencyPrice(activeCandle.open, currency)}</strong>
             </span>
             <span className="text-slate-400">
-              L: <strong className="text-rose-300">{formatCurrencyPrice(hoveredCandle.low, currency)}</strong>
+              H: <strong className="text-emerald-300">{formatCurrencyPrice(activeCandle.high, currency)}</strong>
             </span>
             <span className="text-slate-400">
-              C: <strong className="text-amber-300">{formatCurrencyPrice(hoveredCandle.close, currency)}</strong>
+              L: <strong className="text-rose-300">{formatCurrencyPrice(activeCandle.low, currency)}</strong>
             </span>
+            <span className="text-slate-400">
+              C: <strong className="text-amber-300">{formatCurrencyPrice(activeCandle.close, currency)}</strong>
+            </span>
+            {showVolume && (
+              <span className="text-slate-400">
+                Vol: <strong className="text-slate-200">{formatCompactVolume(activeCandle.volume)}</strong>
+              </span>
+            )}
+            {showEma && activeEma20 !== null && (
+              <span className="text-sky-300">
+                EMA20: <strong>{formatCurrencyPrice(activeEma20, currency)}</strong>
+              </span>
+            )}
+            {showEma && activeEma50 !== null && (
+              <span className="text-violet-300">
+                EMA50: <strong>{formatCurrencyPrice(activeEma50, currency)}</strong>
+              </span>
+            )}
           </div>
-        ) : (
-          <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-            <Crosshair className="w-3.5 h-3.5 text-slate-500" />
-            <span>เลื่อนเมาส์บนกราฟเพื่อดูราคา OHLC แต่ละแท่งเทียน ({candles.length} แท่ง · {history.timeframe})</span>
-          </div>
-        )}
-        <span className="text-[11px] text-sky-300">
-          โครงสร้างคลื่นเบื้องต้น (ZigZag + Pivot S/R · โควตา AI 0%)
+        ) : null}
+
+        <span className="text-[11px] text-slate-400">
+          {candles.length} แท่ง ({history.timeframe}) · โควตา AI 0%
         </span>
       </div>
 
-      {/* Interactive SVG Canvas */}
-      <div className="relative rounded-lg border border-[#1E2634] bg-[#090C11] overflow-hidden">
+      {/* Full-Height Interactive SVG Canvas (min-h-[520px] h-[58vh]) */}
+      <div className="relative rounded-lg border border-[#1E2634] bg-[#090C11] overflow-hidden min-h-[520px] h-[58vh] flex items-center justify-center">
         <svg
           viewBox={`0 0 ${width} ${height}`}
-          className="w-full h-[320px] sm:h-[390px] select-none block"
+          preserveAspectRatio="xMidYMid meet"
+          className="w-full h-full select-none block"
           onMouseLeave={() => setHoverIndex(null)}
           onMouseMove={(e) => {
             const rect = e.currentTarget.getBoundingClientRect();
@@ -313,7 +393,7 @@ function InteractiveStructureSvgChart({
             }
           }}
         >
-          {/* Gridlines & Y-Axis Labels */}
+          {/* Price Area Gridlines & Y-Axis Labels */}
           {gridTicks.map((tick, idx) => {
             const y = yOf(tick);
             return (
@@ -330,7 +410,7 @@ function InteractiveStructureSvgChart({
                   x={width - padRight + 8}
                   y={y + 4}
                   fill="#64748B"
-                  fontSize="10"
+                  fontSize="11"
                   fontFamily="JetBrains Mono, monospace"
                 >
                   {formatCurrencyPrice(tick, currency)}
@@ -338,6 +418,45 @@ function InteractiveStructureSvgChart({
               </g>
             );
           })}
+
+          {/* Volume Sub-Pane Divider & Bars */}
+          {showVolume && (
+            <g>
+              <line
+                x1={padLeft}
+                y1={volTopY - 4}
+                x2={width - padRight}
+                y2={volTopY - 4}
+                stroke="#1E2634"
+                strokeWidth="1"
+              />
+              <text
+                x={width - padRight + 8}
+                y={volTopY + 12}
+                fill="#64748B"
+                fontSize="10"
+                fontFamily="JetBrains Mono, monospace"
+              >
+                Vol {formatCompactVolume(maxVolume)}
+              </text>
+              {candles.map((c, idx) => {
+                const x = xOf(idx);
+                const isUp = c.close >= c.open;
+                const barH = Math.max(1, (c.volume / maxVolume) * (volAreaH - 6));
+                return (
+                  <rect
+                    key={`vol-${c.timestamp}`}
+                    x={x - candleBodyW / 2}
+                    y={volBottomY - barH}
+                    width={candleBodyW}
+                    height={barH}
+                    fill={isUp ? 'rgba(16, 185, 129, 0.36)' : 'rgba(244, 63, 94, 0.36)'}
+                    rx="0.75"
+                  />
+                );
+              })}
+            </g>
+          )}
 
           {/* Horizontal Support / Resistance / Breakeven Lines */}
           {horizontalLevels.map((lv) => {
@@ -356,9 +475,9 @@ function InteractiveStructureSvgChart({
                 />
                 <rect
                   x={width - padRight + 2}
-                  y={y - 9}
-                  width={86}
-                  height={18}
+                  y={y - 10}
+                  width={92}
+                  height={20}
                   rx={4}
                   fill={lv.badgeBg}
                   stroke={lv.stroke}
@@ -366,9 +485,9 @@ function InteractiveStructureSvgChart({
                 />
                 <text
                   x={width - padRight + 7}
-                  y={y + 3.5}
+                  y={y + 4}
                   fill={lv.textFill}
-                  fontSize="9.5"
+                  fontSize="10"
                   fontWeight="600"
                   fontFamily="JetBrains Mono, monospace"
                 >
@@ -397,8 +516,8 @@ function InteractiveStructureSvgChart({
                   x2={x}
                   y2={yLow}
                   stroke={color}
-                  strokeWidth="1.2"
-                  opacity="0.85"
+                  strokeWidth="1.25"
+                  opacity="0.88"
                 />
                 <rect
                   x={x - candleBodyW / 2}
@@ -406,19 +525,43 @@ function InteractiveStructureSvgChart({
                   width={candleBodyW}
                   height={bodyH}
                   fill={color}
-                  rx="0.75"
+                  rx="0.85"
                 />
               </g>
             );
           })}
+
+          {/* EMA 20 & EMA 50 Lines */}
+          {showEma && ema50Points && (
+            <polyline
+              fill="none"
+              stroke="#A78BFA"
+              strokeWidth="1.75"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              points={ema50Points}
+              opacity="0.9"
+            />
+          )}
+          {showEma && ema20Points && (
+            <polyline
+              fill="none"
+              stroke="#38BDF8"
+              strokeWidth="1.75"
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              points={ema20Points}
+              opacity="0.92"
+            />
+          )}
 
           {/* Preliminary Elliott Wave ZigZag Polyline & Labels */}
           {showElliottWave && structure && structure.wavePoints.length >= 2 && (
             <g>
               <polyline
                 fill="none"
-                stroke="#38BDF8"
-                strokeWidth="2.2"
+                stroke="#22D3EE"
+                strokeWidth="2.3"
                 strokeLinejoin="round"
                 strokeLinecap="round"
                 points={wavePolylinePoints}
@@ -427,33 +570,33 @@ function InteractiveStructureSvgChart({
               {structure.wavePoints.map((wp) => {
                 const cx = xOf(wp.candleIndex);
                 const cy = yOf(wp.price);
-                const labelOffsetY = wp.type === 'high' ? -15 : 16;
+                const labelOffsetY = wp.type === 'high' ? -17 : 18;
                 return (
                   <g key={`${wp.candleIndex}-${wp.label}`}>
                     <circle
                       cx={cx}
                       cy={cy}
-                      r="4.2"
+                      r="4.5"
                       fill="#090C11"
-                      stroke="#38BDF8"
+                      stroke="#22D3EE"
                       strokeWidth="2"
                     />
                     <rect
-                      x={cx - 10}
-                      y={cy + labelOffsetY - 9}
-                      width="20"
-                      height="16"
+                      x={cx - 11}
+                      y={cy + labelOffsetY - 10}
+                      width="22"
+                      height="18"
                       rx="4"
-                      fill="#0C4A6E"
-                      stroke="#38BDF8"
+                      fill="#083344"
+                      stroke="#22D3EE"
                       strokeWidth="1"
                     />
                     <text
                       x={cx}
-                      y={cy + labelOffsetY + 2.5}
+                      y={cy + labelOffsetY + 3}
                       textAnchor="middle"
-                      fill="#E0F2FE"
-                      fontSize="10"
+                      fill="#CFFAFE"
+                      fontSize="11"
                       fontWeight="700"
                       fontFamily="JetBrains Mono, monospace"
                     >
@@ -490,7 +633,13 @@ function InteractiveStructureSvgChart({
           )}
 
           {/* X-Axis Sparse Time Labels */}
-          {[0, Math.floor(candles.length * 0.25), Math.floor(candles.length * 0.5), Math.floor(candles.length * 0.75), candles.length - 1]
+          {[
+            0,
+            Math.floor(candles.length * 0.25),
+            Math.floor(candles.length * 0.5),
+            Math.floor(candles.length * 0.75),
+            candles.length - 1,
+          ]
             .filter((i, pos, arr) => i >= 0 && i < candles.length && arr.indexOf(i) === pos)
             .map((idx) => (
               <text
@@ -499,7 +648,7 @@ function InteractiveStructureSvgChart({
                 y={height - 10}
                 textAnchor={idx === 0 ? 'start' : idx === candles.length - 1 ? 'end' : 'middle'}
                 fill="#64748B"
-                fontSize="10"
+                fontSize="11"
               >
                 {candles[idx].label}
               </text>
@@ -565,7 +714,7 @@ function InteractiveStructureSvgChart({
           </div>
 
           <div className="p-3 rounded-lg bg-[#0D121A] border border-[#1E2634]">
-            <div className="text-[11px] text-sky-300 font-medium flex items-center gap-1">
+            <div className="text-[11px] text-cyan-300 font-medium flex items-center gap-1">
               <Waves className="w-3.5 h-3.5" />
               <span>โครงสร้างคลื่นเบื้องต้น</span>
             </div>
@@ -592,13 +741,18 @@ export function TechnicalChartModal({
   onClose,
   onUpdateCost,
 }: TechnicalChartModalProps) {
+  const isThaiStock = asset ? isThaiStockAsset(asset) : false;
+
   const [chartMode, setChartMode] = useState<'tradingview' | 'structure'>('tradingview');
   const [timeframe, setTimeframe] = useState<ChartTimeframe>('1D');
   const [showElliottWave, setShowElliottWave] = useState(true);
+  const [showEma, setShowEma] = useState(true);
+  const [showVolume, setShowVolume] = useState(true);
 
   const [history, setHistory] = useState<ChartHistoryResponse | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyReloadNonce, setHistoryReloadNonce] = useState(0);
 
   // Local editable cost state so user can tweak Breakeven live inside chart modal
   const [costInput, setCostInput] = useState('');
@@ -611,16 +765,18 @@ export function TechnicalChartModal({
   const [loadingAi, setLoadingAi] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
 
+  // Automatically route Thai SET/.BK stocks to Real Candlestick Structure chart and US/Global to TradingView
   useEffect(() => {
     if (!asset) return;
-    setChartMode('tradingview');
+    const thai = isThaiStockAsset(asset);
+    setChartMode(thai ? 'structure' : 'tradingview');
     setTimeframe('1D');
     setActiveAverageCost(asset.averageCost);
     setActiveQuantity(asset.quantity);
     setCostInput(asset.averageCost ? String(asset.averageCost) : '');
     setQtyInput(asset.quantity ? String(asset.quantity) : '');
     setAiError(null);
-  }, [asset?.symbol, asset?.averageCost, asset?.quantity]);
+  }, [asset?.symbol, asset?.category, asset?.market, asset?.averageCost, asset?.quantity]);
 
   // Close modal on Escape
   useEffect(() => {
@@ -632,7 +788,7 @@ export function TechnicalChartModal({
     return () => window.removeEventListener('keydown', onKey);
   }, [asset, onClose]);
 
-  // Load 0%-AI historical candles whenever asset or timeframe changes
+  // Load 0%-AI historical candles via /api/chart-data whenever asset or timeframe changes
   useEffect(() => {
     if (!asset) return;
     let cancelled = false;
@@ -658,7 +814,7 @@ export function TechnicalChartModal({
     return () => {
       cancelled = true;
     };
-  }, [asset?.symbol, asset?.category, timeframe]);
+  }, [asset?.symbol, asset?.category, timeframe, historyReloadNonce]);
 
   // Hydrate ONLY from existing 4-hour LocalStorage cache (never auto-calls Gemini!)
   useEffect(() => {
@@ -676,9 +832,14 @@ export function TechnicalChartModal({
   if (!asset) return null;
 
   const tvSymbol = toTradingViewSymbol(asset);
+  const cleanSetSymbol = getCleanSetSymbol(asset.symbol);
+  const externalTvUrl = getTradingViewExternalUrl(asset);
   const currency = history?.currency || asset.currency || 'USD';
   const latestPrice = history?.latestPrice ?? null;
   const changePercent = history?.changePercent ?? null;
+
+  // Enforce Thai stock isolation even during render before effect settles
+  const effectiveChartMode: 'tradingview' | 'structure' = isThaiStock ? 'structure' : chartMode;
 
   function handleSaveCostInline(e: React.FormEvent) {
     e.preventDefault();
@@ -732,18 +893,18 @@ export function TechnicalChartModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-start justify-center p-2 sm:p-4 overflow-y-auto"
+      className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-2 sm:p-3"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
       aria-label={`กราฟเทคนิคและวิเคราะห์ ${asset.symbol}`}
     >
       <div
-        className="w-full max-w-6xl my-2 sm:my-4 rounded-xl bg-[#10151E] border border-[#243043] shadow-2xl overflow-hidden"
+        className="w-[95vw] max-w-7xl min-h-[88vh] max-h-[94vh] overflow-y-auto rounded-xl bg-[#10151E] border border-[#243043] shadow-2xl flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Modal Header */}
-        <div className="px-4 sm:px-6 py-4 border-b border-[#1E2634] flex flex-wrap items-center justify-between gap-3 bg-[#0C1017]">
+        <div className="px-4 sm:px-6 py-3.5 border-b border-[#1E2634] flex flex-wrap items-center justify-between gap-3 bg-[#0C1017] sticky top-0 z-20">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-lg bg-[#161E2B] border border-[#253042] flex items-center justify-center text-xl shrink-0">
               {asset.flag}
@@ -780,53 +941,77 @@ export function TechnicalChartModal({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-2 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-[#1A2230] transition-colors cursor-pointer"
-            aria-label="ปิดหน้าต่างกราฟ"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Controls Bar: Segmented Chart Mode Switcher + Inline Breakeven Input */}
-        <div className="px-4 sm:px-6 py-3 border-b border-[#1E2634] bg-[#0D121A] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          {/* Confirmed Q2: Segmented Tabs between TradingView & Interactive Structure/Wave */}
-          <div className="flex items-center gap-1 p-1 bg-[#090C11] border border-[#1E2634] rounded-lg overflow-x-auto">
+          <div className="flex items-center gap-2 shrink-0">
+            {isThaiStock && (
+              <a
+                href={externalTvUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-2 rounded-lg bg-[#141E2E] border border-sky-500/40 hover:border-sky-400 text-xs font-semibold text-sky-200 hover:text-sky-100 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+              >
+                <span>เปิดกราฟ SET:{cleanSetSymbol} บน TradingView</span>
+                <ExternalLink className="w-3.5 h-3.5 text-sky-400" />
+              </a>
+            )}
             <button
               type="button"
-              onClick={() => setChartMode('tradingview')}
-              className={`px-3.5 py-2 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
-                chartMode === 'tradingview'
-                  ? 'bg-[#1C2536] text-amber-300'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
+              onClick={onClose}
+              className="p-2 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-[#1A2230] transition-colors cursor-pointer"
+              aria-label="ปิดหน้าต่างกราฟ"
             >
-              <BarChart2 className="w-3.5 h-3.5" />
-              <span>กราฟ TradingView (เครื่องมือวาดเส้นครบ)</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setChartMode('structure')}
-              className={`px-3.5 py-2 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
-                chartMode === 'structure'
-                  ? 'bg-[#1C2536] text-amber-300'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Waves className="w-3.5 h-3.5" />
-              <span>โครงสร้างราคา จุดคุ้มทุน &amp; Elliott Wave</span>
+              <X className="w-5 h-5" />
             </button>
           </div>
+        </div>
+
+        {/* Controls Bar: Adaptive Mode Switcher (Hidden TradingView Embed on Thai SET) + Inline Breakeven Input */}
+        <div className="px-4 sm:px-6 py-3 border-b border-[#1E2634] bg-[#0D121A] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          {isThaiStock ? (
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="px-3.5 py-2 text-xs font-semibold rounded-lg bg-[#161E2C] border border-amber-500/35 text-amber-300 inline-flex items-center gap-1.5 whitespace-nowrap">
+                <Waves className="w-3.5 h-3.5" />
+                <span>กราฟแท่งเทียนจริง จุดคุ้มทุน &amp; Elliott Wave (ตลาดหุ้นไทย SET)</span>
+              </div>
+              <span className="text-[11px] text-slate-400">
+                ดึงราคา OHLCV จริงของ {cleanSetSymbol}.BK ฝั่งเซิร์ฟเวอร์ (ไม่เด้งกลับเป็น AAPL)
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1 p-1 bg-[#090C11] border border-[#1E2634] rounded-lg overflow-x-auto">
+              <button
+                type="button"
+                onClick={() => setChartMode('tradingview')}
+                className={`px-3.5 py-2 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                  effectiveChartMode === 'tradingview'
+                    ? 'bg-[#1C2536] text-amber-300'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <BarChart2 className="w-3.5 h-3.5" />
+                <span>กราฟ TradingView (เครื่องมือวาดเส้นครบ)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setChartMode('structure')}
+                className={`px-3.5 py-2 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                  effectiveChartMode === 'structure'
+                    ? 'bg-[#1C2536] text-amber-300'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Waves className="w-3.5 h-3.5" />
+                <span>กราฟแท่งเทียนจริง จุดคุ้มทุน &amp; Elliott Wave</span>
+              </button>
+            </div>
+          )}
 
           {/* Live Breakeven Cost Editor (0% AI Quota) */}
           <form
             onSubmit={handleSaveCostInline}
-            className="flex flex-wrap items-center gap-2 text-xs"
+            className="flex flex-wrap items-center gap-2 text-xs shrink-0"
           >
             <label className="text-slate-400 whitespace-nowrap">
-              🎯 ทุนเฉลี่ย ({currency}):
+              ทุนเฉลี่ย ({currency}):
             </label>
             <input
               type="number"
@@ -835,7 +1020,7 @@ export function TechnicalChartModal({
               value={costInput}
               onChange={(e) => setCostInput(e.target.value)}
               placeholder="เช่น 150.50"
-              className="w-28 bg-[#090C11] border border-[#253042] rounded-md px-2.5 py-1.5 font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500/70"
+              className="w-28 bg-[#090C11] border border-[#253042] rounded-md px-2.5 py-1.5 font-mono tabular-nums text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500/70"
             />
             {asset.portfolioId && (
               <input
@@ -845,7 +1030,7 @@ export function TechnicalChartModal({
                 value={qtyInput}
                 onChange={(e) => setQtyInput(e.target.value)}
                 placeholder="จำนวนหน่วย"
-                className="w-24 bg-[#090C11] border border-[#253042] rounded-md px-2.5 py-1.5 font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500/70"
+                className="w-24 bg-[#090C11] border border-[#253042] rounded-md px-2.5 py-1.5 font-mono tabular-nums text-xs text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500/70"
               />
             )}
             <button
@@ -858,12 +1043,16 @@ export function TechnicalChartModal({
         </div>
 
         {/* Chart Viewport */}
-        <div className="p-4 sm:p-6 space-y-5">
-          {chartMode === 'tradingview' ? (
-            <TradingViewWidgetPanel tvSymbol={tvSymbol} />
+        <div className="p-4 sm:p-6 space-y-5 flex-1">
+          {effectiveChartMode === 'tradingview' ? (
+            <TradingViewWidgetPanel
+              key={tvSymbol}
+              tvSymbol={tvSymbol}
+              externalUrl={externalTvUrl}
+            />
           ) : (
             <div className="space-y-3">
-              {/* Timeframe Switcher (1D / 4H / 1H) + Elliott Wave Toggle */}
+              {/* Timeframe Switcher (1D default / 4H / 1H) + Toggleable Overlays (Elliott Wave, EMA 20/50, Volume) */}
               <div className="flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex items-center gap-1 p-1 bg-[#090C11] border border-[#1E2634] rounded-lg">
                   {(['1D', '4H', '1H'] as const).map((tf) => (
@@ -871,7 +1060,7 @@ export function TechnicalChartModal({
                       key={tf}
                       type="button"
                       onClick={() => setTimeframe(tf)}
-                      className={`px-3 py-1.5 text-xs font-mono font-semibold rounded-md transition-colors whitespace-nowrap cursor-pointer ${
+                      className={`px-3.5 py-1.5 text-xs font-mono font-semibold rounded-md transition-colors whitespace-nowrap cursor-pointer ${
                         timeframe === tf
                           ? 'bg-amber-500 text-slate-950'
                           : 'text-slate-400 hover:text-slate-100'
@@ -882,40 +1071,88 @@ export function TechnicalChartModal({
                   ))}
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setShowElliottWave((prev) => !prev)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
-                    showElliottWave
-                      ? 'bg-sky-500/15 border-sky-500/45 text-sky-200'
-                      : 'bg-[#0D121A] border-[#253042] text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  <Waves className="w-3.5 h-3.5" />
-                  <span>
-                    เส้นคลื่น Elliott Wave เบื้องต้น: {showElliottWave ? 'เปิด' : 'ปิด'}
-                  </span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowElliottWave((prev) => !prev)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                      showElliottWave
+                        ? 'bg-cyan-500/15 border-cyan-500/45 text-cyan-200'
+                        : 'bg-[#0D121A] border-[#253042] text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Waves className="w-3.5 h-3.5" />
+                    <span>Elliott Wave: {showElliottWave ? 'เปิด' : 'ปิด'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowEma((prev) => !prev)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                      showEma
+                        ? 'bg-violet-500/15 border-violet-500/45 text-violet-200'
+                        : 'bg-[#0D121A] border-[#253042] text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Activity className="w-3.5 h-3.5" />
+                    <span>EMA 20/50: {showEma ? 'เปิด' : 'ปิด'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowVolume((prev) => !prev)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                      showVolume
+                        ? 'bg-emerald-500/15 border-emerald-500/45 text-emerald-200'
+                        : 'bg-[#0D121A] border-[#253042] text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <BarChart3 className="w-3.5 h-3.5" />
+                    <span>Volume: {showVolume ? 'เปิด' : 'ปิด'}</span>
+                  </button>
+                </div>
               </div>
 
               {loadingHistory ? (
-                <div className="h-[390px] rounded-lg border border-[#1E2634] bg-[#090C11] flex flex-col items-center justify-center gap-2 text-xs text-slate-400">
-                  <Loader2 className="w-5 h-5 animate-spin text-amber-400" />
-                  <span>กำลังดึงแท่งเทียนย้อนหลัง {timeframe} จาก Yahoo Finance (ใช้โควตา AI 0%)...</span>
+                <div className="min-h-[520px] h-[58vh] rounded-lg border border-[#1E2634] bg-[#090C11] flex flex-col items-center justify-center gap-2.5 text-xs text-slate-400">
+                  <Loader2 className="w-6 h-6 animate-spin text-amber-400" />
+                  <span>
+                    กำลังดึงแท่งเทียนย้อนหลัง {timeframe} ของ {asset.symbol} จาก Yahoo Finance (ใช้โควตา AI 0%)...
+                  </span>
                 </div>
               ) : historyError ? (
-                <div className="p-8 rounded-lg border border-rose-500/30 bg-rose-500/[0.06] text-center space-y-2">
-                  <AlertCircle className="w-5 h-5 text-rose-400 mx-auto" />
-                  <p className="text-xs text-rose-200">{historyError}</p>
-                  <p className="text-[11px] text-slate-400">
-                    คุณยังสามารถสลับไปดูกราฟสดในแท็บ TradingView ได้ทันที
-                  </p>
+                <div className="min-h-[520px] h-[58vh] p-8 rounded-lg border border-rose-500/30 bg-rose-500/[0.06] flex flex-col items-center justify-center text-center space-y-3">
+                  <AlertCircle className="w-6 h-6 text-rose-400" />
+                  <p className="text-sm text-rose-200 max-w-md">{historyError}</p>
+                  <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setHistoryReloadNonce((n) => n + 1)}
+                      className="px-3.5 py-2 rounded-lg text-xs font-semibold bg-amber-500 text-slate-950 hover:bg-amber-400 inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>ลองโหลดกราฟใหม่</span>
+                    </button>
+                    <a
+                      href={externalTvUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3.5 py-2 rounded-lg text-xs font-medium bg-[#141E2E] border border-sky-500/40 text-sky-200 hover:text-sky-100 inline-flex items-center gap-1.5"
+                    >
+                      <span>
+                        เปิดกราฟ {isThaiStock ? `SET:${cleanSetSymbol}` : tvSymbol} บน TradingView
+                      </span>
+                      <ExternalLink className="w-3.5 h-3.5" />
+                    </a>
+                  </div>
                 </div>
               ) : history ? (
                 <InteractiveStructureSvgChart
                   history={history}
                   averageCost={activeAverageCost}
                   showElliottWave={showElliottWave}
+                  showEma={showEma}
+                  showVolume={showVolume}
                 />
               ) : null}
             </div>
@@ -971,7 +1208,7 @@ export function TechnicalChartModal({
                   ) : (
                     <>
                       <Sparkles className="w-4 h-4" />
-                      <span>✨ วิเคราะห์กราฟ คลื่น Elliott Wave &amp; จุดซื้อขายด้วย AI</span>
+                      <span>วิเคราะห์กราฟ คลื่น Elliott Wave &amp; จุดซื้อขายด้วย AI</span>
                     </>
                   )}
                 </button>
@@ -1013,7 +1250,7 @@ export function TechnicalChartModal({
                       Timeframe <strong className="font-mono text-slate-200">{aiAnalysis.timeframe}</strong>
                     </span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-500">
+                  <span className="text-[11px] font-mono tabular-nums text-slate-500">
                     วิเคราะห์เมื่อ{' '}
                     {new Date(aiAnalysis.analyzedAt).toLocaleTimeString('th-TH', {
                       hour: '2-digit',
@@ -1026,8 +1263,8 @@ export function TechnicalChartModal({
                 {/* Elliott Wave Block */}
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 text-xs">
                   <div className="p-3 rounded-lg bg-[#10151E] border border-[#1E2634] lg:col-span-1">
-                    <div className="text-[11px] text-sky-300 font-semibold">
-                      🌊 สถานะคลื่น Elliott Wave ปัจจุบัน
+                    <div className="text-[11px] text-cyan-300 font-semibold">
+                      สถานะคลื่น Elliott Wave ปัจจุบัน
                     </div>
                     <p className="text-slate-200 mt-1 leading-relaxed">
                       {aiAnalysis.waveStatusTh}
@@ -1082,7 +1319,7 @@ export function TechnicalChartModal({
                 {/* Breakeven Strategy & Summary */}
                 <div className="space-y-2 pt-2 border-t border-[#1A2230] text-xs leading-relaxed">
                   <p className="text-amber-200">
-                    <strong className="text-amber-300">🎯 คำแนะนำเทียบจุดคุ้มทุน:</strong>{' '}
+                    <strong className="text-amber-300">คำแนะนำเทียบจุดคุ้มทุน:</strong>{' '}
                     {aiAnalysis.breakevenAdviceTh}
                   </p>
                   <p className="text-slate-300">{aiAnalysis.summaryTh}</p>

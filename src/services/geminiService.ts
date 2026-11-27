@@ -144,7 +144,7 @@ export async function fetchChartHistoryLive(
   timeframe: ChartTimeframe
 ): Promise<ChartHistoryResponse> {
   return postServerJson<ChartHistoryResponse>(
-    '/api/chart-history',
+    '/api/chart-data',
     { symbol, category, timeframe },
     'ไม่สามารถดึงข้อมูลกราฟราคาย้อนหลังได้ในขณะนี้'
   );

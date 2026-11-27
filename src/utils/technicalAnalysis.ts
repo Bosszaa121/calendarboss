@@ -155,6 +155,54 @@ const STATIC_TV_SYMBOLS: Record<string, string> = {
 };
 
 /**
+ * Detects whether an asset belongs to Thailand's SET / mai market
+ * (symbol prefixed with SET:, suffixed with .BK, Thai Stock category, or SET/mai market).
+ */
+export function isThaiStockAsset(asset: {
+  symbol: string;
+  category?: AssetCategory;
+  market?: string;
+}): boolean {
+  const raw = asset.symbol.trim().toUpperCase();
+  const marketUpper = (asset.market || '').trim().toUpperCase();
+  return (
+    raw.startsWith('SET:') ||
+    raw.endsWith('.BK') ||
+    asset.category === 'Thai Stock' ||
+    marketUpper === 'SET' ||
+    marketUpper === 'MAI'
+  );
+}
+
+/**
+ * Extracts clean SET ticker symbol (e.g. "SET:KCG" or "KCG.BK" -> "KCG").
+ */
+export function getCleanSetSymbol(symbol: string): string {
+  return symbol
+    .trim()
+    .toUpperCase()
+    .replace(/^SET:/, '')
+    .replace(/\.BK$/, '')
+    .replace(/[^A-Z0-9-]/g, '');
+}
+
+/**
+ * Builds direct TradingView full-chart external link (e.g. https://www.tradingview.com/chart/?symbol=SET%3AKCG).
+ */
+export function getTradingViewExternalUrl(asset: {
+  symbol: string;
+  category: AssetCategory;
+  market?: string;
+}): string {
+  if (isThaiStockAsset(asset)) {
+    const clean = getCleanSetSymbol(asset.symbol);
+    return `https://www.tradingview.com/chart/?symbol=SET%3A${encodeURIComponent(clean)}`;
+  }
+  const tvSym = toTradingViewSymbol(asset);
+  return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tvSym)}`;
+}
+
+/**
  * Automatically maps InvestCal symbols to accurate TradingView Exchange:Ticker codes
  * (e.g., KCG -> SET:KCG, QQQM -> NASDAQ:QQQM, PEP -> NASDAQ:PEP, GLD -> AMEX:GLD, BTC -> BINANCE:BTCUSDT).
  */
@@ -169,8 +217,8 @@ export function toTradingViewSymbol(asset: {
 
   const marketUpper = (asset.market || '').toUpperCase();
 
-  if (asset.category === 'Thai Stock' || raw.endsWith('.BK') || marketUpper === 'SET' || marketUpper === 'MAI') {
-    return `SET:${raw.replace(/\.BK$/, '')}`;
+  if (isThaiStockAsset(asset)) {
+    return `SET:${getCleanSetSymbol(raw)}`;
   }
 
   if (asset.category === 'Crypto') {
@@ -217,6 +265,37 @@ export function formatCurrencyPrice(price: number, currency: string): string {
   if (cur === 'JPY') return `¥${Math.round(price).toLocaleString('en-US')}`;
   if (cur === 'HKD') return `HK$${formatted}`;
   return `${formatted} ${cur}`;
+}
+
+export function formatCompactVolume(vol: number): string {
+  if (!Number.isFinite(vol) || vol <= 0) return '0';
+  if (vol >= 1_000_000_000) return `${(vol / 1_000_000_000).toFixed(2)}B`;
+  if (vol >= 1_000_000) return `${(vol / 1_000_000).toFixed(2)}M`;
+  if (vol >= 1_000) return `${(vol / 1_000).toFixed(1)}K`;
+  return Math.round(vol).toLocaleString('en-US');
+}
+
+/**
+ * Exponential Moving Average (EMA) series over candle closes (0% AI Quota).
+ */
+export function computeEmaSeries(candles: ChartCandle[], period: number): Array<number | null> {
+  if (candles.length === 0 || period <= 1) return candles.map((c) => c.close);
+  const result: Array<number | null> = new Array(candles.length).fill(null);
+  if (candles.length < period) return result;
+
+  let sum = 0;
+  for (let i = 0; i < period; i++) {
+    sum += candles[i].close;
+  }
+  let ema = sum / period;
+  result[period - 1] = ema;
+
+  const multiplier = 2 / (period + 1);
+  for (let i = period; i < candles.length; i++) {
+    ema = (candles[i].close - ema) * multiplier + ema;
+    result[i] = ema;
+  }
+  return result;
 }
 
 function roundPrice(val: number): number {
