@@ -1,254 +1,9 @@
 import {
-  AssetCategory,
   ChartCandle,
   ChartTimeframe,
-  TechnicalStructureResult,
-  WavePoint,
+  ChartTrendDirection,
+  TrendFibonacciResult,
 } from '../types';
-
-const KNOWN_AMEX_ETFS = new Set([
-  'SPY',
-  'VOO',
-  'VTI',
-  'SCHD',
-  'GLD',
-  'SLV',
-  'IAU',
-  'BLOK',
-  'SGOV',
-  'JPST',
-  'XLK',
-  'XLF',
-  'XLE',
-  'XLV',
-  'XLI',
-  'XLP',
-  'XLY',
-  'XLU',
-  'ARKK',
-  'JEPI',
-  'JEPQ',
-  'VYM',
-  'VIG',
-  'VNQ',
-  'EEM',
-  'VEA',
-  'VXUS',
-  'BND',
-  'AGG',
-  'BIL',
-  'SHY',
-  'IEF',
-  'EWJ',
-  'FXI',
-  'KWEB',
-  'MCHI',
-  'THD',
-  'DIA',
-  'IWM',
-  'IVV',
-  'SOXL',
-  'SPXL',
-  'URA',
-  'COPX',
-  'GDX',
-  'GDXJ',
-  'XBI',
-  'BOTZ',
-  'CIBR',
-  'HACK',
-  'ITA',
-]);
-
-const KNOWN_NASDAQ_TICKERS = new Set([
-  'QQQ',
-  'QQQM',
-  'SMH',
-  'SOXX',
-  'TLT',
-  'IBIT',
-  'FBTC',
-  'ETHA',
-  'TQQQ',
-  'SQQQ',
-  'AAPL',
-  'MSFT',
-  'NVDA',
-  'AMZN',
-  'GOOGL',
-  'GOOG',
-  'META',
-  'TSLA',
-  'AVGO',
-  'PEP',
-  'COST',
-  'AMD',
-  'NFLX',
-  'INTC',
-  'QCOM',
-  'TXN',
-  'ADBE',
-  'ASML',
-  'ARM',
-  'PLTR',
-  'COIN',
-  'MSTR',
-  'CRWD',
-  'PANW',
-  'AMAT',
-  'LRCX',
-  'KLAC',
-  'MU',
-  'MRVL',
-  'SBUX',
-  'MDLZ',
-  'PYPL',
-  'ISRG',
-  'AMGN',
-  'GILD',
-  'BKNG',
-  'ABNB',
-  'DASH',
-  'MELI',
-  'PDD',
-  'JD',
-  'BIDU',
-  'NTES',
-  'HON',
-  'LIN',
-  'CSCO',
-  'CMCSA',
-  'TMUS',
-  'SNPS',
-  'CDNS',
-  'FTNT',
-  'ZS',
-  'DDOG',
-  'MDB',
-  'APP',
-  'HOOD',
-  'SOFI',
-  'RIVN',
-  'LCID',
-  'MARA',
-  'RIOT',
-  'CLSK',
-]);
-
-const STATIC_TV_SYMBOLS: Record<string, string> = {
-  XAUUSD: 'OANDA:XAUUSD',
-  'XAU/USD': 'OANDA:XAUUSD',
-  XAGUSD: 'OANDA:XAGUSD',
-  'XAG/USD': 'OANDA:XAGUSD',
-  WTI: 'TVC:USOIL',
-  BRENT: 'TVC:UKOIL',
-  NATGAS: 'OANDA:NATGASUSD',
-  COPPER: 'CAPITALCOM:COPPER',
-  'USD/THB': 'FX_IDC:USDTHB',
-  'EUR/USD': 'FX:EURUSD',
-  'USD/JPY': 'FX:USDJPY',
-  'GBP/USD': 'FX:GBPUSD',
-  'AUD/USD': 'FX:AUDUSD',
-  DXY: 'TVC:DXY',
-  'BRK.B': 'NYSE:BRK.B',
-  'BRK.A': 'NYSE:BRK.A',
-};
-
-/**
- * Detects whether an asset belongs to Thailand's SET / mai market
- * (symbol prefixed with SET:, suffixed with .BK, Thai Stock category, or SET/mai market).
- */
-export function isThaiStockAsset(asset: {
-  symbol: string;
-  category?: AssetCategory;
-  market?: string;
-}): boolean {
-  const raw = asset.symbol.trim().toUpperCase();
-  const marketUpper = (asset.market || '').trim().toUpperCase();
-  return (
-    raw.startsWith('SET:') ||
-    raw.endsWith('.BK') ||
-    asset.category === 'Thai Stock' ||
-    marketUpper === 'SET' ||
-    marketUpper === 'MAI'
-  );
-}
-
-/**
- * Extracts clean SET ticker symbol (e.g. "SET:KCG" or "KCG.BK" -> "KCG").
- */
-export function getCleanSetSymbol(symbol: string): string {
-  return symbol
-    .trim()
-    .toUpperCase()
-    .replace(/^SET:/, '')
-    .replace(/\.BK$/, '')
-    .replace(/[^A-Z0-9-]/g, '');
-}
-
-/**
- * Builds direct TradingView full-chart external link (e.g. https://www.tradingview.com/chart/?symbol=SET%3AKCG).
- */
-export function getTradingViewExternalUrl(asset: {
-  symbol: string;
-  category: AssetCategory;
-  market?: string;
-}): string {
-  if (isThaiStockAsset(asset)) {
-    const clean = getCleanSetSymbol(asset.symbol);
-    return `https://www.tradingview.com/chart/?symbol=SET%3A${encodeURIComponent(clean)}`;
-  }
-  const tvSym = toTradingViewSymbol(asset);
-  return `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tvSym)}`;
-}
-
-/**
- * Automatically maps InvestCal symbols to accurate TradingView Exchange:Ticker codes
- * (e.g., KCG -> SET:KCG, QQQM -> NASDAQ:QQQM, PEP -> NASDAQ:PEP, GLD -> AMEX:GLD, BTC -> BINANCE:BTCUSDT).
- */
-export function toTradingViewSymbol(asset: {
-  symbol: string;
-  category: AssetCategory;
-  market?: string;
-}): string {
-  const raw = asset.symbol.trim().toUpperCase();
-  if (raw.includes(':')) return raw;
-  if (STATIC_TV_SYMBOLS[raw]) return STATIC_TV_SYMBOLS[raw];
-
-  const marketUpper = (asset.market || '').toUpperCase();
-
-  if (isThaiStockAsset(asset)) {
-    return `SET:${getCleanSetSymbol(raw)}`;
-  }
-
-  if (asset.category === 'Crypto') {
-    const base = raw.replace(/-USD$/, '').replace(/USDT$/, '');
-    return `BINANCE:${base}USDT`;
-  }
-
-  if (raw.endsWith('.T')) return `TSE:${raw.replace(/\.T$/, '')}`;
-  if (raw.endsWith('.HK')) return `HKEX:${raw.replace(/\.HK$/, '').replace(/^0+/, '')}`;
-  if (raw.endsWith('.L')) return `LSE:${raw.replace(/\.L$/, '')}`;
-  if (raw.endsWith('.DE')) return `XETR:${raw.replace(/\.DE$/, '')}`;
-  if (raw.endsWith('.PA')) return `EURONEXT:${raw.replace(/\.PA$/, '')}`;
-  if (raw.endsWith('.AS')) return `EURONEXT:${raw.replace(/\.AS$/, '')}`;
-
-  if (KNOWN_NASDAQ_TICKERS.has(raw) || marketUpper.includes('NASDAQ')) {
-    return `NASDAQ:${raw}`;
-  }
-  if (KNOWN_AMEX_ETFS.has(raw) || marketUpper.includes('ARCA') || marketUpper.includes('AMEX')) {
-    return `AMEX:${raw}`;
-  }
-  if (marketUpper.includes('NYSE')) {
-    return `NYSE:${raw}`;
-  }
-
-  if (asset.category === 'US ETF') {
-    return `AMEX:${raw}`;
-  }
-
-  return `NYSE:${raw}`;
-}
 
 export function formatCurrencyPrice(price: number, currency: string): string {
   const abs = Math.abs(price);
@@ -265,14 +20,6 @@ export function formatCurrencyPrice(price: number, currency: string): string {
   if (cur === 'JPY') return `¥${Math.round(price).toLocaleString('en-US')}`;
   if (cur === 'HKD') return `HK$${formatted}`;
   return `${formatted} ${cur}`;
-}
-
-export function formatCompactVolume(vol: number): string {
-  if (!Number.isFinite(vol) || vol <= 0) return '0';
-  if (vol >= 1_000_000_000) return `${(vol / 1_000_000_000).toFixed(2)}B`;
-  if (vol >= 1_000_000) return `${(vol / 1_000_000).toFixed(2)}M`;
-  if (vol >= 1_000) return `${(vol / 1_000).toFixed(1)}K`;
-  return Math.round(vol).toLocaleString('en-US');
 }
 
 /**
@@ -300,147 +47,94 @@ export function computeEmaSeries(candles: ChartCandle[], period: number): Array<
 
 function roundPrice(val: number): number {
   const abs = Math.abs(val);
-  if (abs >= 100) return Number(val.toFixed(2));
   if (abs >= 1) return Number(val.toFixed(2));
   return Number(val.toFixed(4));
 }
 
-/**
- * ZigZag Swing Detection to extract alternating structural pivot highs and lows.
- */
-function detectZigZagPivots(
-  candles: ChartCandle[],
-  reversalPct: number
-): Array<{ candleIndex: number; timestamp: number; price: number; type: 'high' | 'low' }> {
-  if (candles.length < 5) return [];
-
-  const pivots: Array<{
-    candleIndex: number;
-    timestamp: number;
-    price: number;
-    type: 'high' | 'low';
-  }> = [];
-
-  let trend: 'up' | 'down' | null = null;
-  let extremeIdx = 0;
-  let extremeHigh = candles[0].high;
-  let extremeLow = candles[0].low;
-
-  for (let i = 1; i < candles.length; i++) {
-    const c = candles[i];
-
-    if (trend === null) {
-      if (c.high > extremeHigh) {
-        extremeHigh = c.high;
-        if ((extremeHigh - extremeLow) / Math.max(extremeLow, 1e-6) >= reversalPct) {
-          pivots.push({
-            candleIndex: extremeIdx,
-            timestamp: candles[extremeIdx].timestamp,
-            price: extremeLow,
-            type: 'low',
-          });
-          trend = 'up';
-          extremeIdx = i;
-        }
-      }
-      if (c.low < extremeLow) {
-        extremeLow = c.low;
-        if ((extremeHigh - extremeLow) / Math.max(extremeHigh, 1e-6) >= reversalPct) {
-          pivots.push({
-            candleIndex: extremeIdx,
-            timestamp: candles[extremeIdx].timestamp,
-            price: extremeHigh,
-            type: 'high',
-          });
-          trend = 'down';
-          extremeIdx = i;
-        }
-      }
-    } else if (trend === 'up') {
-      if (c.high >= extremeHigh) {
-        extremeHigh = c.high;
-        extremeIdx = i;
-      } else if ((extremeHigh - c.low) / Math.max(extremeHigh, 1e-6) >= reversalPct) {
-        pivots.push({
-          candleIndex: extremeIdx,
-          timestamp: candles[extremeIdx].timestamp,
-          price: extremeHigh,
-          type: 'high',
-        });
-        trend = 'down';
-        extremeLow = c.low;
-        extremeIdx = i;
-      }
-    } else {
-      if (c.low <= extremeLow) {
-        extremeLow = c.low;
-        extremeIdx = i;
-      } else if ((c.high - extremeLow) / Math.max(extremeLow, 1e-6) >= reversalPct) {
-        pivots.push({
-          candleIndex: extremeIdx,
-          timestamp: candles[extremeIdx].timestamp,
-          price: extremeLow,
-          type: 'low',
-        });
-        trend = 'up';
-        extremeHigh = c.high;
-        extremeIdx = i;
-      }
+function getLatestEma(series: Array<number | null>): number | null {
+  for (let i = series.length - 1; i >= 0; i--) {
+    const val = series[i];
+    if (typeof val === 'number' && Number.isFinite(val)) {
+      return roundPrice(val);
     }
   }
-
-  // Append active leg endpoint
-  if (trend === 'up') {
-    pivots.push({
-      candleIndex: extremeIdx,
-      timestamp: candles[extremeIdx].timestamp,
-      price: extremeHigh,
-      type: 'high',
-    });
-  } else if (trend === 'down') {
-    pivots.push({
-      candleIndex: extremeIdx,
-      timestamp: candles[extremeIdx].timestamp,
-      price: extremeLow,
-      type: 'low',
-    });
-  }
-
-  return pivots;
+  return null;
 }
 
 /**
- * Mathematical Technical Engine (0% AI Quota):
- * Computes Support 1/2, Resistance 1/2 (Swing High/Low + Pivot Points),
- * Breakeven P/L, and preliminary Elliott Wave ZigZag structure (1-2-3-4-5 or A-B-C).
+ * Pure Mathematical Trend, Support/Resistance & Fibonacci Engine (0% AI Quota):
+ * 1. EMA 20 / EMA 50 Trend Classification (Uptrend / Downtrend / Sideway)
+ * 2. Key Support 1/2 & Resistance 1/2 (Swing High/Low + Classic Pivot confluence)
+ * 3. Fibonacci Retracement (38.2%, 50.0%, 61.8%) & Extension Targets (127.2%, 161.8%)
+ * 4. Breakeven Cost P/L and % distance to next upside Fibonacci target
  */
-export function computeTechnicalStructure(
+export function computeTrendAndFibonacci(
   candles: ChartCandle[],
   timeframe: ChartTimeframe,
   averageCost?: number
-): TechnicalStructureResult | null {
+): TrendFibonacciResult | null {
   if (candles.length < 6) return null;
 
   const latestPrice = candles[candles.length - 1].close;
-  const lookback = candles.slice(-Math.min(candles.length, 40));
+  const ema20Series = computeEmaSeries(candles, 20);
+  const ema50Series = computeEmaSeries(candles, 50);
+  const ema20 = getLatestEma(ema20Series);
+  const ema50 = getLatestEma(ema50Series);
 
-  let periodHigh = -Infinity;
-  let periodLow = Infinity;
-  for (const c of lookback) {
-    if (c.high > periodHigh) periodHigh = c.high;
-    if (c.low < periodLow) periodLow = c.low;
+  let trend: ChartTrendDirection = 'Sideway';
+  let trendTh = 'ไซด์เวย์ (Sideway)';
+
+  if (ema20 !== null && ema50 !== null) {
+    if (latestPrice > ema20 && ema20 >= ema50) {
+      trend = 'Uptrend';
+      trendTh = 'เทรนขาขึ้น (Uptrend)';
+    } else if (latestPrice < ema20 && ema20 <= ema50) {
+      trend = 'Downtrend';
+      trendTh = 'เทรนขาลง (Downtrend)';
+    } else {
+      trend = 'Sideway';
+      trendTh = 'ไซด์เวย์ (Sideway)';
+    }
+  } else if (ema20 !== null) {
+    if (latestPrice > ema20 * 1.005) {
+      trend = 'Uptrend';
+      trendTh = 'เทรนขาขึ้น (Uptrend)';
+    } else if (latestPrice < ema20 * 0.995) {
+      trend = 'Downtrend';
+      trendTh = 'เทรนขาลง (Downtrend)';
+    }
   }
 
-  // Classic Pivot Points over recent window
-  const pivot = (periodHigh + periodLow + latestPrice) / 3;
-  const pivotR1 = 2 * pivot - periodLow;
-  const pivotS1 = 2 * pivot - periodHigh;
-  const pivotR2 = pivot + (periodHigh - periodLow);
-  const pivotS2 = pivot - (periodHigh - periodLow);
+  // Recent structural window for Swing High / Swing Low & Pivot confluence
+  const windowSize = timeframe === '1D' ? 60 : 80;
+  const lookback = candles.slice(-Math.min(candles.length, windowSize));
 
-  // Detect local swing highs and lows (radius 2 bars) for real S/R confluence
-  const swingHighs: number[] = [];
-  const swingLows: number[] = [];
+  let swingHigh = -Infinity;
+  let swingLow = Infinity;
+  for (const c of lookback) {
+    if (c.high > swingHigh) swingHigh = c.high;
+    if (c.low < swingLow) swingLow = c.low;
+  }
+
+  const range = Math.max(swingHigh - swingLow, latestPrice * 0.01);
+
+  // Classic Pivot Points over recent 40 candles
+  const pivotWindow = candles.slice(-Math.min(candles.length, 40));
+  let pHigh = -Infinity;
+  let pLow = Infinity;
+  for (const c of pivotWindow) {
+    if (c.high > pHigh) pHigh = c.high;
+    if (c.low < pLow) pLow = c.low;
+  }
+  const pivot = (pHigh + pLow + latestPrice) / 3;
+  const pivotR1 = 2 * pivot - pLow;
+  const pivotS1 = 2 * pivot - pHigh;
+  const pivotR2 = pivot + (pHigh - pLow);
+  const pivotS2 = pivot - (pHigh - pLow);
+
+  // Local swing highs & lows (radius 2 bars)
+  const localHighs: number[] = [];
+  const localLows: number[] = [];
   for (let i = 2; i < candles.length - 2; i++) {
     const h = candles[i].high;
     const l = candles[i].low;
@@ -450,7 +144,7 @@ export function computeTechnicalStructure(
       h >= candles[i + 1].high &&
       h >= candles[i + 2].high
     ) {
-      swingHighs.push(h);
+      localHighs.push(h);
     }
     if (
       l <= candles[i - 1].low &&
@@ -458,14 +152,14 @@ export function computeTechnicalStructure(
       l <= candles[i + 1].low &&
       l <= candles[i + 2].low
     ) {
-      swingLows.push(l);
+      localLows.push(l);
     }
   }
 
-  const aboveSwings = swingHighs
+  const aboveSwings = localHighs
     .filter((p) => p > latestPrice * 1.003)
     .sort((a, b) => a - b);
-  const belowSwings = swingLows
+  const belowSwings = localLows
     .filter((p) => p < latestPrice * 0.997)
     .sort((a, b) => b - a);
 
@@ -474,93 +168,50 @@ export function computeTechnicalStructure(
   );
   const resistance2 = roundPrice(
     aboveSwings.find((p) => p > resistance1 * 1.012) ??
-      Math.max(pivotR2, periodHigh, resistance1 * 1.035)
+      Math.max(pivotR2, swingHigh, resistance1 * 1.035)
   );
   const support1 = roundPrice(
     belowSwings[0] ?? Math.min(pivotS1, latestPrice * 0.98)
   );
   const support2 = roundPrice(
     belowSwings.find((p) => p < support1 * 0.988) ??
-      Math.min(pivotS2, periodLow, support1 * 0.965)
+      Math.min(pivotS2, swingLow, support1 * 0.965)
   );
 
-  // Adaptive ZigZag threshold so we capture 4-6 clear structural wave legs
-  const basePct = timeframe === '1D' ? 0.035 : timeframe === '4H' ? 0.018 : 0.01;
-  let pivots = detectZigZagPivots(candles, basePct);
-  if (pivots.length < 4) {
-    pivots = detectZigZagPivots(candles, basePct * 0.55);
-  }
-  if (pivots.length < 4) {
-    pivots = detectZigZagPivots(candles, basePct * 0.3);
-  }
+  // Fibonacci Retracement (Pullback Support Zones from Swing High)
+  const fib382 = roundPrice(swingHigh - range * 0.382);
+  const fib500 = roundPrice(swingHigh - range * 0.5);
+  const fib618 = roundPrice(swingHigh - range * 0.618);
 
-  let wavePattern: TechnicalStructureResult['wavePattern'] = 'insufficient';
-  let waveDirection: TechnicalStructureResult['waveDirection'] = 'sideway';
-  let wavePoints: WavePoint[] = [];
+  // Fibonacci Extension Targets (Upside Breakout Targets)
+  const fib1272 = roundPrice(swingLow + range * 1.272);
+  const fib1618 = roundPrice(swingLow + range * 1.618);
 
-  if (pivots.length >= 6) {
-    const recent6 = pivots.slice(-6);
-    const startP = recent6[0].price;
-    const endP = recent6[5].price;
-    const netPct = (endP - startP) / Math.max(startP, 1e-6);
+  // Pick next meaningful upside Fibonacci target strictly above current price
+  const orderedFibTargets: Array<{ label: string; price: number }> = [
+    { label: 'Fib 61.8%', price: fib618 },
+    { label: 'Fib 50.0%', price: fib500 },
+    { label: 'Fib 38.2%', price: fib382 },
+    { label: 'Fib 127.2%', price: fib1272 },
+    { label: 'Fib 161.8%', price: fib1618 },
+  ];
 
-    // Check if recent 6 pivots form a clean directional 5-wave impulsive progression
-    const isBullishImpulse =
-      recent6[0].type === 'low' &&
-      recent6[2].price > recent6[0].price &&
-      recent6[3].price > recent6[1].price &&
-      netPct > 0.01;
+  // Prefer extension targets (127.2% / 161.8%) if price is already near/above Fib 38.2%
+  const upsideTarget =
+    latestPrice >= fib382 * 0.99
+      ? orderedFibTargets.find(
+          (t) =>
+            (t.label === 'Fib 127.2%' || t.label === 'Fib 161.8%') &&
+            t.price > latestPrice * 1.003
+        ) ?? { label: 'Fib 161.8%', price: fib1618 }
+      : orderedFibTargets.find((t) => t.price > latestPrice * 1.005) ?? {
+          label: 'Fib 127.2%',
+          price: fib1272,
+        };
 
-    const isBearishImpulse =
-      recent6[0].type === 'high' &&
-      recent6[2].price < recent6[0].price &&
-      recent6[3].price < recent6[1].price &&
-      netPct < -0.01;
-
-    if (isBullishImpulse || isBearishImpulse) {
-      wavePattern = 'impulse';
-      waveDirection = isBullishImpulse ? 'up' : 'down';
-      const labels = ['0', '1', '2', '3', '4', '5'];
-      wavePoints = recent6.map((p, idx) => ({
-        ...p,
-        price: roundPrice(p.price),
-        label: labels[idx],
-      }));
-    } else {
-      // Otherwise label the most recent 4 pivots as A-B-C correction
-      const recent4 = pivots.slice(-4);
-      wavePattern = 'correction';
-      const corrNet = recent4[3].price - recent4[0].price;
-      waveDirection =
-        Math.abs(corrNet / Math.max(recent4[0].price, 1e-6)) < 0.01
-          ? 'sideway'
-          : corrNet > 0
-          ? 'up'
-          : 'down';
-      const labels = ['0', 'A', 'B', 'C'];
-      wavePoints = recent4.map((p, idx) => ({
-        ...p,
-        price: roundPrice(p.price),
-        label: labels[idx],
-      }));
-    }
-  } else if (pivots.length >= 4) {
-    const recent4 = pivots.slice(-4);
-    wavePattern = 'correction';
-    const corrNet = recent4[3].price - recent4[0].price;
-    waveDirection =
-      Math.abs(corrNet / Math.max(recent4[0].price, 1e-6)) < 0.01
-        ? 'sideway'
-        : corrNet > 0
-        ? 'up'
-        : 'down';
-    const labels = ['0', 'A', 'B', 'C'];
-    wavePoints = recent4.map((p, idx) => ({
-      ...p,
-      price: roundPrice(p.price),
-      label: labels[idx],
-    }));
-  }
+  const distanceToNextFibPct = Number(
+    (((upsideTarget.price - latestPrice) / Math.max(latestPrice, 1e-6)) * 100).toFixed(2)
+  );
 
   let breakevenDeltaAbs: number | null = null;
   let breakevenDeltaPct: number | null = null;
@@ -571,15 +222,29 @@ export function computeTechnicalStructure(
 
   return {
     latestPrice: roundPrice(latestPrice),
+    ema20,
+    ema50,
+    trend,
+    trendTh,
     support1,
     support2,
     resistance1,
     resistance2,
-    pivot: roundPrice(pivot),
-    wavePattern,
-    waveDirection,
-    wavePoints,
+    swingHigh: roundPrice(swingHigh),
+    swingLow: roundPrice(swingLow),
+    fibRetracement: {
+      fib382,
+      fib500,
+      fib618,
+    },
+    fibExtension: {
+      fib1272,
+      fib1618,
+    },
     breakevenDeltaAbs,
     breakevenDeltaPct,
+    nextFibTargetLabel: upsideTarget.label,
+    nextFibTargetPrice: upsideTarget.price,
+    distanceToNextFibPct,
   };
 }

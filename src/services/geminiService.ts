@@ -3,8 +3,8 @@ import {
   ChartAiAnalysisResponse,
   ChartHistoryResponse,
   ChartTimeframe,
+  ChartTrendDirection,
   PortfolioAsset,
-  WavePoint,
 } from '../types';
 import {
   ClassifiedAssetResult,
@@ -157,20 +157,25 @@ export interface AnalyzeChartRequestInput {
   currency: string;
   timeframe: ChartTimeframe;
   latestPrice: number;
+  ema20: number | null;
+  ema50: number | null;
+  trend: ChartTrendDirection;
   support1: number;
   support2: number;
   resistance1: number;
   resistance2: number;
-  wavePattern: string;
-  waveDirection: string;
-  wavePoints: WavePoint[];
+  fib382: number;
+  fib500: number;
+  fib618: number;
+  fib1272: number;
+  fib1618: number;
   averageCost?: number;
   quantity?: number;
 }
 
 /**
- * On-Demand AI Technical & Elliott Wave Analysis (4-hour LocalStorage cache).
- * Only fires when the user explicitly clicks the Analyze button!
+ * On-Demand AI Concise Buy/Sell Plan from Trend, S/R & Fibonacci (4-hour LocalStorage cache).
+ * Only fires when the user explicitly taps the button inside TrendFibonacciSheet!
  */
 export async function analyzeChartTechnicalLive(
   input: AnalyzeChartRequestInput,
@@ -190,7 +195,7 @@ export async function analyzeChartTechnicalLive(
       ...input,
       force: Boolean(options?.force),
     },
-    'ไม่สามารถวิเคราะห์กราฟเทคนิคและคลื่น Elliott Wave ด้วย AI ได้ในขณะนี้'
+    'ไม่สามารถสรุปแผนเข้าซื้อ-ขายด้วย AI ได้ในขณะนี้'
   );
 
   if (result.aiCalled) {

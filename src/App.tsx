@@ -6,7 +6,6 @@ import {
   CalendarRange,
   CheckCircle2,
   LayoutDashboard,
-  LogIn,
   Newspaper,
   RefreshCw,
   User as UserIcon,
@@ -67,20 +66,15 @@ import { EarningsXDView } from './components/EarningsXDView';
 import { NewsView } from './components/NewsView';
 import { AuthModal } from './components/AuthModal';
 import { NotificationCenter } from './components/NotificationCenter';
-import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
-import {
-  HeaderQuotaGauge,
-  SidebarQuotaCard,
-  useQuotaSnapshot,
-} from './components/ApiQuotaGauge';
-import { TechnicalChartModal } from './components/TechnicalChartModal';
+import { HeaderQuotaDot, useQuotaSnapshot } from './components/ApiQuotaGauge';
+import { TrendFibonacciSheet } from './components/TrendFibonacciSheet';
 
 function InvestCalLogoMark() {
   return (
     <svg
       viewBox="0 0 32 32"
-      className="w-8 h-8 shrink-0"
+      className="w-7 h-7 shrink-0"
       fill="none"
       aria-hidden="true"
     >
@@ -97,13 +91,12 @@ function InvestCalLogoMark() {
       <path d="M2 11H30" stroke="#283549" strokeWidth="1.5" />
       <path d="M10 2V6.5M22 2V6.5" stroke="#F59E0B" strokeWidth="2" strokeLinecap="round" />
       <path
-        d="M8 22L13 17.5L17 20L24 14"
+        d="M9 19H23M9 23.5H17"
         stroke="#FBBF24"
-        strokeWidth="2.2"
+        strokeWidth="2.1"
         strokeLinecap="round"
-        strokeLinejoin="round"
       />
-      <circle cx="24" cy="14" r="2" fill="#10B981" />
+      <circle cx="23" cy="23.5" r="2" fill="#10B981" />
     </svg>
   );
 }
@@ -114,9 +107,9 @@ const NAV_ITEMS: Array<{
   shortLabel: string;
   icon: React.ComponentType<{ className?: string }>;
 }> = [
-  { id: 'dashboard', label: 'แดชบอร์ดภาพรวม', shortLabel: 'ภาพรวม', icon: LayoutDashboard },
-  { id: 'portfolio', label: 'พอร์ตโฟลิโอของฉัน', shortLabel: 'พอร์ตฉัน', icon: Briefcase },
-  { id: 'calendar', label: 'ปฏิทินการลงทุน', shortLabel: 'ปฏิทิน', icon: CalendarRange },
+  { id: 'dashboard', label: 'ภาพรวมการลงทุน', shortLabel: 'ภาพรวม', icon: LayoutDashboard },
+  { id: 'portfolio', label: 'พอร์ตของฉัน', shortLabel: 'พอร์ตฉัน', icon: Briefcase },
+  { id: 'calendar', label: 'ปฏิทินเศรษฐกิจ', shortLabel: 'ปฏิทิน', icon: CalendarRange },
   { id: 'earnings', label: 'งบการเงิน & วัน XD', shortLabel: 'งบ & XD', icon: BarChart3 },
   { id: 'news', label: 'ข่าวโลก & โซเชียล', shortLabel: 'ข่าวสาร', icon: Newspaper },
 ];
@@ -152,7 +145,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavTab>('dashboard');
   const [newsSubTab, setNewsSubTab] = useState<NewsSubTab>('global');
   const [authModalOpen, setAuthModalOpen] = useState(false);
-  const [chartTargetAsset, setChartTargetAsset] = useState<ChartTargetAsset | null>(null);
+  const [trendTargetAsset, setTrendTargetAsset] = useState<ChartTargetAsset | null>(null);
   const quota = useQuotaSnapshot();
 
   // Pure Local Multi-Account State (100% isolated portfolios starting empty)
@@ -224,7 +217,6 @@ export default function App() {
     message: string;
   } | null>(null);
 
-  // Request sequence guard to prevent race conditions during rapid portfolio edits
   const batchedReqIdRef = useRef(0);
   const portfolioRef = useRef<PortfolioAsset[]>(portfolio);
   portfolioRef.current = portfolio;
@@ -263,7 +255,6 @@ export default function App() {
 
   const portfolioMap = useMemo(() => buildPortfolioSymbolMap(portfolio), [portfolio]);
 
-  // Compute all 4 categories of investor alerts strictly from verified live data
   const investorAlerts = useMemo(
     () =>
       buildInvestorAlerts({
@@ -288,7 +279,6 @@ export default function App() {
     ]
   );
 
-  // Automatically trigger Chrome browser notifications when permitted on open / after sync
   useEffect(() => {
     if (notificationPermission !== 'granted') return;
     if (investorAlerts.length === 0) return;
@@ -335,25 +325,6 @@ export default function App() {
     }).length;
   }, [calendarEvents, portfolio, portfolioMap]);
 
-  const matchedNewsCount = useMemo(() => {
-    if (portfolio.length === 0) return 0;
-    return newsItems.filter(
-      (n) =>
-        analyzePortfolioImpacts(
-          {
-            title: n.headline,
-            description: n.impactSummary,
-            category: 'news',
-            relatedAssets: n.relatedAssets,
-            macroTags: n.macroTags,
-            aiImpacts: n.aiImpacts,
-          },
-          portfolio,
-          portfolioMap
-        ).length > 0
-    ).length;
-  }, [newsItems, portfolio, portfolioMap]);
-
   const urgentEarningsXDCount = useMemo(() => {
     const eSoon = earningsRecords.filter(
       (e) =>
@@ -373,10 +344,7 @@ export default function App() {
     return eSoon + xSoon;
   }, [earningsRecords, dividendRecords]);
 
-  // =========================================================================
-  // SINGLE BATCHED SYNC: Free Google News RSS + Yahoo Finance + 1 Gemini Call
-  // Cached in LocalStorage for 6 hours (BATCHED_CACHE_TTL_MS)
-  // =========================================================================
+  // SINGLE BATCHED SYNC: Free Google News RSS + Yahoo Finance + 1 Gemini Call (Cached 6h)
   const syncBatchedAllLive = useCallback(
     async (targetPortfolio: PortfolioAsset[], targetAccountId: string, silent = false) => {
       const reqId = ++batchedReqIdRef.current;
@@ -401,7 +369,8 @@ export default function App() {
             oneWeekAgo: data.fearGreed.oneWeekAgo ?? val,
             oneMonthAgo: data.fearGreed.oneMonthAgo ?? val,
             marketNote:
-              data.fearGreed.marketNote || 'วิเคราะห์บรรยากาศตลาดล่าสุดจากข่าว RSS และ Yahoo Finance',
+              data.fearGreed.marketNote ||
+              'วิเคราะห์บรรยากาศตลาดล่าสุดจากข่าว RSS และ Yahoo Finance',
             updatedLabel: data.fearGreed.updatedLabel || `อัปเดตสด ${nowTime} น.`,
           };
         }
@@ -442,7 +411,7 @@ export default function App() {
         } else if (!silent) {
           setNotice({
             type: 'success',
-            message: `อัปเดตข้อมูลล่าสุดสำเร็จ เวลา ${nowTime} น. — ปฏิทิน ${data.calendarEvents.length}, ข่าว ${data.newsItems.length}, โซเชียล ${data.socialInsights.length} และราคา/ปันผล Yahoo Finance (แคช 6 ชม.)`,
+            message: `อัปเดตสำเร็จ ${nowTime} น. — ปฏิทิน ${data.calendarEvents.length}, ข่าว ${data.newsItems.length}, ราคา ${Object.keys(data.quotes || {}).length} ตัว`,
           });
         }
       } catch (err) {
@@ -471,11 +440,7 @@ export default function App() {
     [syncBatchedAllLive]
   );
 
-  // -------------------------------------------------------------------------
-  // Automatic 6-Hour Cached Batched Sync Lifecycle (Zero Redundant Requests):
-  // Fires 1 single batched request ONLY when no fresh (< 6 hours) cache from
-  // today exists for the active account + portfolio signature.
-  // -------------------------------------------------------------------------
+  // Automatic 6-Hour Cached Batched Sync Lifecycle
   const lastAutoSyncKeyRef = useRef<string>('');
   useEffect(() => {
     const syncKey = `${activeAccountId}::${portfolioSignature}`;
@@ -493,7 +458,6 @@ export default function App() {
       return;
     }
 
-    // Coalesce rapid multi-asset additions into 1 single batched call
     const delayMs = lastAutoSyncKeyRef.current === '' ? 150 : 1200;
     const timer = window.setTimeout(() => {
       lastAutoSyncKeyRef.current = syncKey;
@@ -539,7 +503,7 @@ export default function App() {
       savePortfolioForAccount(activeAccountId, next);
       return next;
     });
-    setChartTargetAsset((prev) =>
+    setTrendTargetAsset((prev) =>
       prev && prev.portfolioId === id ? { ...prev, averageCost, quantity } : prev
     );
   }
@@ -684,9 +648,10 @@ export default function App() {
           return merged;
         });
 
+        setAuthModalOpen(false);
         setNotice({
           type: 'success',
-          message: `นำเข้าสินทรัพย์จากไฟล์ JSON จำนวน ${sanitized.length} รายการเรียบร้อยแล้ว — กำลังอัปเดตราคา ปันผล และข่าวล่าสุดในคำขอเดียว`,
+          message: `นำเข้าสินทรัพย์จากไฟล์ JSON จำนวน ${sanitized.length} รายการเรียบร้อยแล้ว`,
         });
       } catch (err) {
         setNotice({
@@ -754,13 +719,13 @@ export default function App() {
     if (perm === 'granted') {
       setNotice({
         type: 'success',
-        message: 'เปิดรับการแจ้งเตือนผ่าน Chrome เรียบร้อยแล้ว ระบบจะแจ้งเตือนอัตโนมัติเมื่อพบความเสี่ยง งบ หรือวัน XD',
+        message: 'เปิดรับการแจ้งเตือนผ่าน Chrome เรียบร้อยแล้ว',
       });
       await sendTestChromeNotification(portfolio.map((p) => p.symbol));
     } else if (perm === 'denied') {
       setNotice({
         type: 'error',
-        message: 'เบราว์เซอร์ปฏิเสธสิทธิ์การแจ้งเตือน กรุณาอนุญาต Notifications ที่ไอคอนตั้งค่าข้างแถบ URL ของ Chrome',
+        message: 'เบราว์เซอร์ปฏิเสธสิทธิ์การแจ้งเตือน กรุณาอนุญาตในการตั้งค่า Chrome',
       });
     }
   }
@@ -771,159 +736,41 @@ export default function App() {
       type: 'success',
       message: sent
         ? 'ส่งการแจ้งเตือนทดสอบไปยัง Chrome สำเร็จแล้ว'
-        : 'ทดสอบการแจ้งเตือนในแอปสำเร็จ (กดปุ่ม "เปิดรับแจ้งเตือน Chrome" เพื่อรับแจ้งเตือนนอกเบราว์เซอร์)',
+        : 'ทดสอบการแจ้งเตือนในแอปสำเร็จ',
     });
   }
 
-  const currentNavMeta = NAV_ITEMS.find((n) => n.id === activeTab) ?? NAV_ITEMS[0];
-
-  const todayFormattedTh = useMemo(() => {
+  const todayShortTh = useMemo(() => {
     return new Date().toLocaleDateString('th-TH', {
-      weekday: 'long',
+      weekday: 'short',
       day: 'numeric',
-      month: 'long',
-      year: 'numeric',
+      month: 'short',
     });
   }, []);
 
   return (
-    <div className="min-h-screen bg-[#090C11] text-[#E6EDF3] flex">
-      {/* Desktop Sidebar (256px) */}
-      <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-[#0C1017] border-r border-[#1B2230] z-30">
-        {/* Brand */}
-        <div className="h-16 px-5 flex items-center gap-3 border-b border-[#1B2230]">
-          <InvestCalLogoMark />
-          <span className="text-lg font-bold tracking-tight text-slate-100 whitespace-nowrap">
-            InvestCal
-          </span>
-        </div>
+    <div className="min-h-screen bg-[#090C11] text-[#E6EDF3] overflow-x-hidden">
+      <OfflineIndicator />
 
-        {/* Navigation Links (5 Main Tabs) */}
-        <nav className="flex-1 px-3 py-5 space-y-1" aria-label="เมนูหลัก">
-          {NAV_ITEMS.map((item) => {
-            const Icon = item.icon;
-            const active = activeTab === item.id;
-            const badgeCount =
-              item.id === 'calendar'
-                ? matchedCalendar14dCount
-                : item.id === 'news'
-                ? matchedNewsCount
-                : item.id === 'earnings'
-                ? urgentEarningsXDCount
-                : item.id === 'portfolio'
-                ? portfolio.length
-                : null;
-
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => handleNavigate(item.id)}
-                className={`w-full flex items-center justify-between gap-2 px-3.5 py-2.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap cursor-pointer ${
-                  active
-                    ? 'bg-amber-500/12 text-amber-300 border border-amber-500/25'
-                    : 'text-slate-400 hover:text-slate-100 hover:bg-[#141B27] border border-transparent'
-                }`}
-              >
-                <span className="flex items-center gap-3 min-w-0">
-                  <Icon
-                    className={`w-4 h-4 shrink-0 ${
-                      active ? 'text-amber-400' : 'text-slate-500'
-                    }`}
-                  />
-                  <span className="truncate">{item.label}</span>
-                </span>
-                {badgeCount !== null && badgeCount > 0 && (
-                  <span
-                    className={`font-mono tabular-nums text-[11px] px-1.5 py-0.5 rounded ${
-                      active
-                        ? 'text-amber-300 bg-amber-500/15'
-                        : item.id === 'earnings'
-                        ? 'text-emerald-300 bg-emerald-500/12'
-                        : 'text-slate-500'
-                    }`}
-                  >
-                    {badgeCount}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* Sidebar Quota Gauge, Account Profile, PWA Install & Sync Status */}
-        <div className="p-3.5 border-t border-[#1B2230] space-y-2.5 overflow-y-auto">
-          <SidebarQuotaCard quota={quota} />
-
+      {/* Centered Mobile-First App Shell */}
+      <div className="max-w-xl mx-auto min-h-screen flex flex-col pb-24">
+        {/* Clean Single-Row Sticky Top Header (h-14) */}
+        <header className="sticky top-0 z-30 h-14 bg-[#090C11]/95 backdrop-blur-md border-b border-[#1B2230] px-4 flex items-center justify-between gap-2">
+          {/* Left: Full InvestCal Logo & Brand (never clipped) */}
           <button
             type="button"
-            onClick={() => setAuthModalOpen(true)}
-            className="w-full p-2.5 rounded-lg bg-[#101621] border border-[#1F293A] hover:border-amber-500/45 transition-colors flex items-center gap-2.5 text-left cursor-pointer"
+            onClick={() => handleNavigate('dashboard')}
+            className="flex items-center gap-2 shrink-0 cursor-pointer"
           >
-            <div className="w-8 h-8 rounded-full bg-[#192334] border border-[#29374E] flex items-center justify-center text-amber-300 text-xs font-bold shrink-0">
-              {activeAccount ? (
-                activeAccount.displayName.slice(0, 2).toUpperCase()
-              ) : (
-                <UserIcon className="w-4 h-4" />
-              )}
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="text-xs font-semibold text-slate-100 truncate">
-                {activeAccountLabel}
-              </div>
-              <div className="text-[11px] text-slate-400 truncate">
-                {activeAccount ? `@${activeAccount.username} · สลับบัญชี` : 'เข้าสู่ระบบ / สมัครสมาชิก'}
-              </div>
-            </div>
+            <InvestCalLogoMark />
+            <span className="text-base font-bold tracking-tight text-slate-100 whitespace-nowrap">
+              InvestCal
+            </span>
           </button>
 
-          <PWAInstallButton />
-
-          <div className="px-1 text-[11px] space-y-1">
-            <div className="flex items-center justify-between text-slate-400">
-              <span>สินทรัพย์ในพอร์ต</span>
-              <span className="font-mono tabular-nums text-slate-200 font-semibold">
-                {portfolio.length} รายการ
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-slate-500">
-              <span>อัปเดตล่าสุด (แคช 6 ชม.)</span>
-              <span className="font-mono tabular-nums">
-                {isSyncing ? 'กำลังอัปเดต...' : lastSyncedAt ? `${lastSyncedAt} น.` : 'รออัปเดต'}
-              </span>
-            </div>
-          </div>
-        </div>
-      </aside>
-
-      {/* Main Content Wrapper */}
-      <div className="flex-1 lg:pl-64 flex flex-col min-w-0">
-        <OfflineIndicator />
-
-        {/* Sticky Top Header */}
-        <header className="sticky top-0 z-30 h-16 bg-[#090C11]/90 backdrop-blur-md border-b border-[#1B2230] px-4 sm:px-6 flex items-center justify-between gap-2.5">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="flex items-center gap-2 lg:hidden shrink-0">
-              <InvestCalLogoMark />
-              <span className="text-base font-bold tracking-tight text-slate-100 whitespace-nowrap">
-                InvestCal
-              </span>
-            </div>
-
-            <div className="hidden lg:flex items-center gap-2.5 min-w-0">
-              <h1 className="text-base font-semibold text-slate-100 whitespace-nowrap">
-                {currentNavMeta.label}
-              </h1>
-              <span className="text-slate-600" aria-hidden="true">/</span>
-              <span className="text-xs text-slate-400 truncate">
-                {todayFormattedTh}
-              </span>
-            </div>
-          </div>
-
-          {/* Top-Right Controls: Quota Gauge + Alerts Bell + PWA Install + Local Account + Live Sync */}
-          <div className="flex items-center gap-2 shrink-0">
-            <HeaderQuotaGauge quota={quota} />
+          {/* Right: ONLY Quota Dot + Bell + Account + Update */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <HeaderQuotaDot quota={quota} onClick={() => setAuthModalOpen(true)} />
 
             <NotificationCenter
               alerts={investorAlerts}
@@ -936,49 +783,25 @@ export default function App() {
               onSelectAlert={(tab, sub) => handleNavigate(tab, { newsSubTab: sub })}
             />
 
-            <div className="lg:hidden">
-              <PWAInstallButton compact />
-            </div>
-
             <button
               type="button"
               onClick={() => setAuthModalOpen(true)}
-              className="px-2.5 sm:px-3 py-2 text-xs font-medium rounded-lg bg-[#121926] border border-[#253042] text-slate-200 hover:border-amber-500/50 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              className="h-9 px-2.5 text-xs font-medium rounded-lg bg-[#121926] border border-[#253042] text-slate-200 hover:border-amber-500/50 transition-colors inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
             >
-              {activeAccount ? (
-                <>
-                  <UserIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span className="max-w-[96px] truncate hidden sm:inline">
-                    @{activeAccount.username}
-                  </span>
-                  <span className="sm:hidden">บัญชี</span>
-                </>
-              ) : (
-                <>
-                  <LogIn className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                  <span className="hidden sm:inline">เข้าสู่ระบบ / สมัครสมาชิก</span>
-                  <span className="sm:hidden">บัญชี</span>
-                </>
-              )}
+              <UserIcon className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span>บัญชี</span>
             </button>
 
             <button
               type="button"
               onClick={() => void handleLiveSyncAll(false)}
               disabled={isSyncing || quota.isCoolingDown}
-              className="px-3 sm:px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 disabled:opacity-65 disabled:cursor-not-allowed transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              className="h-9 px-2.5 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 disabled:opacity-65 disabled:cursor-not-allowed transition-colors inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <RefreshCw
                 className={`w-3.5 h-3.5 shrink-0 ${isSyncing ? 'animate-spin' : ''}`}
               />
-              <span className="hidden sm:inline">
-                {isSyncing
-                  ? 'กำลังอัปเดต...'
-                  : quota.isCoolingDown
-                  ? `พักโควตา (${quota.cooldownSecondsLeft}s)`
-                  : 'อัปเดตข้อมูลล่าสุด'}
-              </span>
-              <span className="sm:hidden">
+              <span>
                 {isSyncing
                   ? 'อัปเดต...'
                   : quota.isCoolingDown
@@ -989,11 +812,19 @@ export default function App() {
           </div>
         </header>
 
-        {/* Sync / Action Notice Banner */}
+        {/* Compact Status Meta Strip */}
+        <div className="px-4 pt-3 pb-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
+          <span className="truncate">{todayShortTh} · {activeAccountLabel}</span>
+          <span className="font-mono tabular-nums shrink-0">
+            {isSyncing ? 'กำลังซิงค์...' : lastSyncedAt ? `อัปเดต ${lastSyncedAt} น.` : 'รออัปเดต'}
+          </span>
+        </div>
+
+        {/* Notice Toast Banner */}
         {notice && (
-          <div className="px-4 sm:px-6 pt-4">
+          <div className="px-4 pt-2">
             <div
-              className={`rounded-lg px-4 py-2.5 text-xs flex items-center justify-between gap-3 border ${
+              className={`rounded-xl px-3.5 py-2.5 text-xs flex items-center justify-between gap-2.5 border ${
                 notice.type === 'success'
                   ? 'bg-emerald-500/10 border-emerald-500/35 text-emerald-200'
                   : 'bg-rose-500/10 border-rose-500/35 text-rose-200'
@@ -1010,7 +841,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setNotice(null)}
-                className="text-slate-400 hover:text-slate-100 shrink-0 cursor-pointer"
+                className="text-slate-400 hover:text-slate-100 shrink-0 cursor-pointer p-1"
                 aria-label="ปิดการแจ้งเตือน"
               >
                 <X className="w-4 h-4" />
@@ -1020,18 +851,12 @@ export default function App() {
         )}
 
         {/* Active View Content */}
-        <main className="flex-1 w-full max-w-[1360px] mx-auto px-4 sm:px-6 py-5 pb-24 lg:pb-10">
-          <div className="lg:hidden mb-4">
-            <h1 className="text-lg font-semibold text-slate-100">
-              {currentNavMeta.label}
-            </h1>
-            <p className="text-xs text-slate-400 mt-0.5">{todayFormattedTh}</p>
-          </div>
-
+        <main className="flex-1 p-4 space-y-3">
           {activeTab === 'dashboard' && (
             <DashboardView
               portfolio={portfolio}
               portfolioMap={portfolioMap}
+              liveQuotes={liveQuotes}
               calendarEvents={calendarEvents}
               newsItems={newsItems}
               earningsRecords={earningsRecords}
@@ -1041,6 +866,7 @@ export default function App() {
               isLoadingMarket={isSyncing}
               marketError={syncError}
               onRetryMarket={() => void handleLiveSyncAll(false)}
+              onOpenTrendSheet={setTrendTargetAsset}
               onNavigate={handleNavigate}
             />
           )}
@@ -1056,9 +882,7 @@ export default function App() {
               onAddAsset={handleAddAsset}
               onRemoveAsset={handleRemoveAsset}
               onUpdateAssetCost={handleUpdateAssetCost}
-              onOpenChart={setChartTargetAsset}
-              onExportJson={handleExportJson}
-              onImportJsonFile={handleImportJsonFile}
+              onOpenTrendSheet={setTrendTargetAsset}
               onOpenAuth={() => setAuthModalOpen(true)}
               onNavigate={handleNavigate}
             />
@@ -1124,49 +948,67 @@ export default function App() {
         </main>
       </div>
 
-      {/* Mobile Bottom Navigation Bar (5 Main Tabs) */}
+      {/* Fixed Thumb-Friendly 5-Tab Bottom Navigation Bar */}
       <nav
-        aria-label="แถบนำทางมือถือ"
-        className="lg:hidden fixed bottom-0 inset-x-0 z-40 h-16 bg-[#0C1017]/95 backdrop-blur-md border-t border-[#1E2634] grid grid-cols-5"
+        aria-label="แถบนำทางหลัก"
+        className="fixed bottom-0 inset-x-0 z-40 bg-[#0C1017]/95 backdrop-blur-md border-t border-[#1E2634]"
       >
-        {NAV_ITEMS.map((item) => {
-          const Icon = item.icon;
-          const active = activeTab === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => handleNavigate(item.id)}
-              className={`flex flex-col items-center justify-center gap-1 min-h-[44px] transition-colors cursor-pointer ${
-                active ? 'text-amber-400' : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Icon className="w-5 h-5" />
-              <span className="text-[10px] font-medium whitespace-nowrap">
-                {item.shortLabel}
-              </span>
-            </button>
-          );
-        })}
+        <div className="max-w-xl mx-auto h-16 grid grid-cols-5">
+          {NAV_ITEMS.map((item) => {
+            const Icon = item.icon;
+            const active = activeTab === item.id;
+            const badge =
+              item.id === 'calendar'
+                ? matchedCalendar14dCount
+                : item.id === 'earnings'
+                ? urgentEarningsXDCount
+                : 0;
+
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => handleNavigate(item.id)}
+                className={`relative flex flex-col items-center justify-center gap-1 min-h-[44px] transition-colors cursor-pointer ${
+                  active ? 'text-amber-400' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <div className="relative">
+                  <Icon className="w-5 h-5" />
+                  {badge > 0 && (
+                    <span className="absolute -top-1 -right-2 min-w-[14px] h-[14px] px-1 rounded-full bg-amber-500 text-slate-950 font-mono text-[9px] font-bold flex items-center justify-center">
+                      {badge > 9 ? '9+' : badge}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[10px] font-medium whitespace-nowrap">
+                  {item.shortLabel}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </nav>
 
-      {/* Local Multi-Account Auth & JSON Backup Modal */}
+      {/* Unified Account, Settings, Quota Gauge, PWA Install & JSON Backup Modal */}
       <AuthModal
         open={authModalOpen}
         onClose={() => setAuthModalOpen(false)}
         accounts={accounts}
         activeAccountId={activeAccountId}
+        portfolioCount={portfolio.length}
+        quota={quota}
         onAuthChange={handleAuthChange}
         onExportJson={handleExportJson}
         onImportJsonFile={handleImportJsonFile}
       />
 
-      {/* Technical Charting, Breakeven P/L & On-Demand AI Elliott Wave Modal */}
-      <TechnicalChartModal
-        asset={chartTargetAsset}
+      {/* Trend, Support/Resistance & Fibonacci Mobile Bottom Sheet (Zero Charts) */}
+      <TrendFibonacciSheet
+        asset={trendTargetAsset}
         quota={quota}
-        onClose={() => setChartTargetAsset(null)}
-        onUpdateCost={handleUpdateAssetCost}
+        onClose={() => setTrendTargetAsset(null)}
+        onUpdateAssetCost={handleUpdateAssetCost}
       />
     </div>
   );

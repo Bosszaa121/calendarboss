@@ -1,5 +1,5 @@
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
-import type { ChartTimeframe, WavePoint } from '../../src/types.ts';
+import type { ChartTimeframe, ChartTrendDirection } from '../../src/types.ts';
 import {
   GEMINI_MODEL,
   GEMINI_MODEL_CHAIN,
@@ -567,7 +567,7 @@ export async function handleChartData(body: Record<string, unknown>): Promise<Ha
 }
 
 /**
- * 4. On-Demand AI Technical, Elliott Wave & Entry/TP/SL Analysis (1 Single Request, NO googleSearch)
+ * 4. On-Demand AI Concise Buy/Sell Plan from Trend, S/R & Fibonacci (1 Single Request, NO googleSearch)
  */
 export async function handleAnalyzeChart(
   body: Record<string, unknown>,
@@ -585,7 +585,7 @@ export async function handleAnalyzeChart(
   if (!symbol || !Number.isFinite(latestPrice) || latestPrice <= 0) {
     return {
       status: 400,
-      payload: { error: 'ข้อมูลราคาล่าสุดไม่ครบถ้วนสำหรับวิเคราะห์กราฟเทคนิค' },
+      payload: { error: 'ข้อมูลราคาล่าสุดไม่ครบถ้วนสำหรับวิเคราะห์เทรนและเป้า Fibonacci' },
     };
   }
 
@@ -595,14 +595,33 @@ export async function handleAnalyzeChart(
     typeof body.category === 'string' ? body.category.trim().slice(0, 40) : 'US Stock';
   const currency =
     typeof body.currency === 'string' ? body.currency.trim().toUpperCase().slice(0, 10) : 'USD';
+
+  const rawTrend = typeof body.trend === 'string' ? body.trend.trim() : '';
+  const trend: ChartTrendDirection =
+    rawTrend === 'Uptrend' || rawTrend === 'Downtrend' || rawTrend === 'Sideway'
+      ? rawTrend
+      : 'Sideway';
+
+  const ema20 =
+    typeof body.ema20 === 'number' && Number.isFinite(body.ema20) && body.ema20 > 0
+      ? body.ema20
+      : null;
+  const ema50 =
+    typeof body.ema50 === 'number' && Number.isFinite(body.ema50) && body.ema50 > 0
+      ? body.ema50
+      : null;
+
   const support1 = Number(body.support1) || latestPrice * 0.97;
   const support2 = Number(body.support2) || latestPrice * 0.93;
   const resistance1 = Number(body.resistance1) || latestPrice * 1.03;
   const resistance2 = Number(body.resistance2) || latestPrice * 1.07;
-  const wavePattern =
-    typeof body.wavePattern === 'string' ? body.wavePattern.slice(0, 30) : 'insufficient';
-  const waveDirection =
-    typeof body.waveDirection === 'string' ? body.waveDirection.slice(0, 20) : 'sideway';
+
+  const fib382 = Number(body.fib382) || latestPrice * 0.96;
+  const fib500 = Number(body.fib500) || latestPrice * 0.94;
+  const fib618 = Number(body.fib618) || latestPrice * 0.92;
+  const fib1272 = Number(body.fib1272) || latestPrice * 1.08;
+  const fib1618 = Number(body.fib1618) || latestPrice * 1.15;
+
   const averageCost =
     typeof body.averageCost === 'number' &&
     Number.isFinite(body.averageCost) &&
@@ -614,26 +633,8 @@ export async function handleAnalyzeChart(
       ? body.quantity
       : undefined;
 
-  const wavePoints: WavePoint[] = Array.isArray(body.wavePoints)
-    ? body.wavePoints
-        .filter(
-          (w: unknown): w is Record<string, unknown> =>
-            Boolean(w) &&
-            typeof w === 'object' &&
-            typeof (w as Record<string, unknown>).price === 'number'
-        )
-        .slice(0, 8)
-        .map((w: Record<string, unknown>) => ({
-          candleIndex: Number(w.candleIndex) || 0,
-          timestamp: Number(w.timestamp) || 0,
-          price: Number(w.price),
-          type: w.type === 'high' ? 'high' : 'low',
-          label: typeof w.label === 'string' ? w.label.slice(0, 8) : '',
-        }))
-    : [];
-
   const costSig = averageCost ? averageCost.toFixed(2) : 'none';
-  const cacheKey = `chart-ai::${symbol}::${timeframe}::${costSig}`;
+  const cacheKey = `trend-fib-ai::${symbol}::${timeframe}::${costSig}`;
 
   try {
     const ai = createGeminiClient(apiKey);
@@ -659,13 +660,18 @@ export async function handleAnalyzeChart(
           currency,
           timeframe,
           latestPrice,
+          ema20,
+          ema50,
+          trend,
           support1,
           support2,
           resistance1,
           resistance2,
-          wavePattern,
-          waveDirection,
-          wavePoints,
+          fib382,
+          fib500,
+          fib618,
+          fib1272,
+          fib1618,
           averageCost,
           quantity,
         });
@@ -684,7 +690,7 @@ export async function handleAnalyzeChart(
   } catch (err) {
     const { status, message, rateLimited, isDailyLimit } = formatServerGeminiError(
       err,
-      'ไม่สามารถวิเคราะห์กราฟเทคนิคและคลื่น Elliott Wave ด้วย AI ได้'
+      'ไม่สามารถสรุปแผนเข้าซื้อ-ขายด้วย AI ได้ในขณะนี้'
     );
     return { status, payload: { error: message, rateLimited, isDailyLimit } };
   }

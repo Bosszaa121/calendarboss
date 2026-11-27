@@ -1,22 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BellRing,
   Calendar,
   Check,
-  Download,
-  LineChart,
+  ChevronDown,
+  ChevronUp,
   Loader2,
   Newspaper,
   Pencil,
   Plus,
   Search,
   Sparkles,
+  Target,
   Trash2,
   TrendingDown,
   TrendingUp,
-  Upload,
-  UserCheck,
-  X,
 } from 'lucide-react';
 import {
   ASSET_CATALOG,
@@ -33,29 +30,13 @@ import {
   NewsItem,
   PortfolioAsset,
 } from '../types';
-import {
-  formatThaiShortDate,
-  getAlertsForAsset,
-} from '../utils/portfolioMatcher';
+import { formatThaiShortDate, getAlertsForAsset } from '../utils/portfolioMatcher';
+import { formatCurrencyPrice } from '../utils/technicalAnalysis';
 import { classifyAssetLive } from '../services/geminiService';
-
-function formatLivePrice(price: number, currency: string): string {
-  const digits = Math.abs(price) >= 100 ? 2 : Math.abs(price) >= 1 ? 2 : 4;
-  const num = price.toLocaleString('en-US', {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  });
-  if (currency === 'THB') return `฿${num}`;
-  if (currency === 'USD') return `$${num}`;
-  if (currency === 'EUR') return `€${num}`;
-  if (currency === 'GBP') return `£${num}`;
-  if (currency === 'JPY') return `¥${Math.round(price).toLocaleString('en-US')}`;
-  return `${num} ${currency}`;
-}
 
 function formatSignedMoney(amount: number, currency: string): string {
   const sign = amount > 0 ? '+' : amount < 0 ? '-' : '';
-  return `${sign}${formatLivePrice(Math.abs(amount), currency)}`;
+  return `${sign}${formatCurrencyPrice(Math.abs(amount), currency)}`;
 }
 
 function parsePositiveNumber(raw: string): number | undefined {
@@ -75,9 +56,7 @@ interface PortfolioViewProps {
   onAddAsset: (asset: Omit<PortfolioAsset, 'id' | 'addedAt'>) => Promise<void> | void;
   onRemoveAsset: (id: string) => Promise<void> | void;
   onUpdateAssetCost: (id: string, averageCost?: number, quantity?: number) => void;
-  onOpenChart: (asset: ChartTargetAsset) => void;
-  onExportJson: () => void;
-  onImportJsonFile: (file: File) => void;
+  onOpenTrendSheet: (asset: ChartTargetAsset) => void;
   onOpenAuth: () => void;
   onNavigate: (tab: NavTab, options?: { onlyPortfolio?: boolean; searchQuery?: string }) => void;
 }
@@ -112,13 +91,12 @@ export function PortfolioView({
   onAddAsset,
   onRemoveAsset,
   onUpdateAssetCost,
-  onOpenChart,
-  onExportJson,
-  onImportJsonFile,
+  onOpenTrendSheet,
   onOpenAuth,
   onNavigate,
 }: PortfolioViewProps) {
   const [query, setQuery] = useState('');
+  const [showCostInputs, setShowCostInputs] = useState(false);
   const [addAvgCostInput, setAddAvgCostInput] = useState('');
   const [addQtyInput, setAddQtyInput] = useState('');
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -126,6 +104,7 @@ export function PortfolioView({
   const [customCategory, setCustomCategory] = useState<AssetCategory>('US ETF');
   const [activeCategoryFilter, setActiveCategoryFilter] = useState<'ALL' | AssetCategory>('ALL');
   const [classifyingTicker, setClassifyingTicker] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
   const [editingCostId, setEditingCostId] = useState<string | null>(null);
   const [editCostValue, setEditCostValue] = useState('');
   const [editQtyValue, setEditQtyValue] = useState('');
@@ -164,9 +143,7 @@ export function PortfolioView({
 
   const suggestions = useMemo(() => {
     const trimmed = query.trim().toLowerCase();
-    if (!trimmed) {
-      return ASSET_CATALOG.slice(0, 18);
-    }
+    if (!trimmed) return ASSET_CATALOG.slice(0, 14);
 
     const scored = ASSET_CATALOG.map((item) => {
       const sym = item.symbol.toLowerCase();
@@ -192,7 +169,7 @@ export function PortfolioView({
       .filter((entry) => entry.score > 0)
       .sort((a, b) => b.score - a.score || a.item.symbol.localeCompare(b.item.symbol));
 
-    return scored.slice(0, 14).map((entry) => entry.item);
+    return scored.slice(0, 12).map((entry) => entry.item);
   }, [query]);
 
   const rawTrimmedQuery = query.trim();
@@ -215,10 +192,9 @@ export function PortfolioView({
     (!exactCatalogMatch || suggestions.length === 0) &&
     !isAlreadyHeld(upperTrimmedQuery);
 
-  const canQuickPreviewQueryChart =
-    /^[A-Za-z0-9./-]{1,15}$/.test(rawTrimmedQuery) && rawTrimmedQuery.length >= 2;
+  const canQuickPreviewQuery =
+    /^[A-Za-z0-9.:/-]{1,15}$/.test(rawTrimmedQuery) && rawTrimmedQuery.length >= 2;
 
-  // Currency-grouped portfolio cost & unrealized P/L summary
   const portfolioPnlSummaries = useMemo<CurrencyPnlSummary[]>(() => {
     const byCurrency = new Map<
       string,
@@ -272,13 +248,17 @@ export function PortfolioView({
     setFeedbackMsg({ type, text });
     window.setTimeout(() => {
       setFeedbackMsg((prev) => (prev?.text === text ? null : prev));
-    }, 5500);
+    }, 5000);
   }
 
-  function openChartForCatalogItem(item: CatalogAsset) {
+  function toggleExpand(id: string) {
+    setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function openTrendForCatalogItem(item: CatalogAsset) {
     const held = heldBySymbolMap.get(item.symbol.toUpperCase().replace(/\.BK$/, ''));
     setDropdownOpen(false);
-    onOpenChart({
+    onOpenTrendSheet({
       symbol: item.symbol,
       name: item.name,
       category: item.category,
@@ -292,9 +272,9 @@ export function PortfolioView({
     });
   }
 
-  function openChartForPortfolioAsset(asset: PortfolioAsset) {
+  function openTrendForPortfolioAsset(asset: PortfolioAsset) {
     const quote = liveQuotes[asset.symbol.toUpperCase()];
-    onOpenChart({
+    onOpenTrendSheet({
       symbol: asset.symbol,
       name: asset.name,
       category: asset.category,
@@ -308,12 +288,12 @@ export function PortfolioView({
     });
   }
 
-  function openQuickChartForQuery() {
-    if (!canQuickPreviewQueryChart) return;
+  function openQuickTrendForQuery() {
+    if (!canQuickPreviewQuery) return;
     const cleanSym = upperTrimmedQuery;
     const held = heldBySymbolMap.get(cleanSym.replace(/\.BK$/, ''));
     setDropdownOpen(false);
-    onOpenChart({
+    onOpenTrendSheet({
       symbol: cleanSym,
       name: held?.name || cleanSym,
       category: held?.category || (cleanSym.endsWith('.BK') ? 'Thai Stock' : customCategory),
@@ -333,7 +313,7 @@ export function PortfolioView({
 
   async function handleSelectCatalogItem(item: CatalogAsset) {
     if (isAlreadyHeld(item.symbol)) {
-      triggerFeedback('error', `${item.symbol} อยู่ในพอร์ตโฟลิโอของคุณแล้ว`);
+      triggerFeedback('error', `${item.symbol} อยู่ในพอร์ตของคุณแล้ว`);
       setDropdownOpen(false);
       return;
     }
@@ -359,10 +339,7 @@ export function PortfolioView({
       setAddAvgCostInput('');
       setAddQtyInput('');
       setDropdownOpen(false);
-      triggerFeedback(
-        'success',
-        `เพิ่ม ${item.symbol} (${item.name}) เข้าพอร์ตแล้ว${averageCost ? ` · บันทึกทุนเฉลี่ย ${formatLivePrice(averageCost, item.currency)}` : ''}`
-      );
+      triggerFeedback('success', `เพิ่ม ${item.symbol} เข้าพอร์ตแล้ว`);
     } catch (err) {
       triggerFeedback(
         'error',
@@ -374,7 +351,7 @@ export function PortfolioView({
   async function handleGlobalAiSearchAndAdd() {
     if (!rawTrimmedQuery) return;
     if (isAlreadyHeld(upperTrimmedQuery)) {
-      triggerFeedback('error', `${upperTrimmedQuery} อยู่ในพอร์ตโฟลิโอของคุณแล้ว`);
+      triggerFeedback('error', `${upperTrimmedQuery} อยู่ในพอร์ตของคุณแล้ว`);
       return;
     }
 
@@ -389,10 +366,7 @@ export function PortfolioView({
       const officialSymbol = classified.symbol.trim().toUpperCase();
 
       if (isAlreadyHeld(officialSymbol)) {
-        triggerFeedback(
-          'error',
-          `${officialSymbol} (${classified.name}) อยู่ในพอร์ตโฟลิโอของคุณแล้ว`
-        );
+        triggerFeedback('error', `${officialSymbol} อยู่ในพอร์ตของคุณแล้ว`);
         return;
       }
 
@@ -416,16 +390,13 @@ export function PortfolioView({
       setQuery('');
       setAddAvgCostInput('');
       setAddQtyInput('');
-      triggerFeedback(
-        'success',
-        `พบและเพิ่ม ${officialSymbol} — ${classified.name} (${classified.market} · ${classified.sector}) เข้าพอร์ตเรียบร้อยแล้ว`
-      );
+      triggerFeedback('success', `พบและเพิ่ม ${officialSymbol} (${classified.name}) แล้ว`);
     } catch (err) {
       triggerFeedback(
         'error',
         err instanceof Error
           ? err.message
-          : `ไม่สามารถค้นหาข้อมูล "${rawTrimmedQuery}" จากตลาดทั่วโลกได้`
+          : `ไม่สามารถค้นหาข้อมูล "${rawTrimmedQuery}" ได้`
       );
     } finally {
       setClassifyingTicker(null);
@@ -446,8 +417,8 @@ export function PortfolioView({
     triggerFeedback(
       'success',
       parsedCost
-        ? `อัปเดตทุนเฉลี่ย ${asset.symbol} เป็น ${formatLivePrice(parsedCost, asset.currency)}${parsedQty ? ` (${parsedQty.toLocaleString('en-US')} หน่วย)` : ''} แล้ว`
-        : `ล้างข้อมูลราคาทุนเฉลี่ยของ ${asset.symbol} แล้ว`
+        ? `อัปเดตทุนเฉลี่ย ${asset.symbol} เรียบร้อยแล้ว`
+        : `ล้างทุนเฉลี่ยของ ${asset.symbol} แล้ว`
     );
   }
 
@@ -485,75 +456,28 @@ export function PortfolioView({
     }
   }
 
-  function focusSearchInput() {
-    inputRef.current?.focus();
-    setDropdownOpen(true);
-  }
-
   const filteredPortfolio = useMemo(() => {
     if (activeCategoryFilter === 'ALL') return portfolio;
     return portfolio.filter((p) => p.category === activeCategoryFilter);
   }, [portfolio, activeCategoryFilter]);
 
   return (
-    <div className="space-y-6">
-      {/* Add Asset Search Section */}
-      <section className="bg-[#10151E] border border-[#1E2634] rounded-xl p-5">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-4">
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-base font-semibold text-slate-100">
-                เพิ่มสินทรัพย์เข้าพอร์ตโฟลิโอ &amp; ดูกราฟเทคนิค
-              </h2>
-              <span className="text-xs text-slate-400">
-                · บัญชี: <span className="text-slate-200 font-medium">{accountLabel}</span>
-              </span>
-              {isSignedInLocal && (
-                <span className="inline-flex items-center gap-1 text-[11px] text-emerald-400">
-                  <UserCheck className="w-3.5 h-3.5" />
-                  บัญชีส่วนตัวในเครื่อง
-                </span>
-              )}
-            </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              คลังสินทรัพย์ยอดนิยม {ASSET_CATALOG.length}+ ตัว (PEP, KO, AAPL, MSFT, NVDA, QQQM, SMH, BLOK, GLD, SLV, KCG, PTT, CPALL, DELTA ฯลฯ) ค้นหาได้ทั้งชื่อบริษัท/ตัวย่อ กรอกราคาทุนเฉลี่ยเพื่อแสดงเส้นจุดคุ้มทุนและ P/L ในกราฟได้ทันที
-            </p>
-          </div>
-
-          {/* Export / Import JSON Actions */}
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={onExportJson}
-              disabled={portfolio.length === 0}
-              className="px-3 py-1.5 rounded-lg bg-[#161E2B] border border-[#253042] hover:border-amber-500/50 disabled:opacity-45 disabled:cursor-not-allowed text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5 text-amber-400" />
-              <span>Export JSON</span>
-            </button>
-            <label className="px-3 py-1.5 rounded-lg bg-[#161E2B] border border-[#253042] hover:border-sky-500/50 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 transition-colors whitespace-nowrap cursor-pointer">
-              <Upload className="w-3.5 h-3.5 text-sky-400" />
-              <span>Import JSON</span>
-              <input
-                type="file"
-                accept="application/json,.json"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) {
-                    onImportJsonFile(file);
-                    e.target.value = '';
-                  }
-                }}
-              />
-            </label>
-          </div>
+    <div className="space-y-3">
+      {/* Add Asset Search Box (Clean Mobile-First, Export/Import moved to Account modal) */}
+      <section className="bg-[#10151E] border border-[#1E2634] rounded-2xl p-4 space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm font-bold text-slate-100">
+            เพิ่มสินทรัพย์ &amp; วิเคราะห์เทรน
+          </h2>
+          <span className="text-[11px] text-slate-400 truncate">
+            {accountLabel}
+          </span>
         </div>
 
         <div ref={searchContainerRef} className="relative">
-          <div className="flex flex-col sm:flex-row gap-2.5">
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1 min-w-0">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 ref={inputRef}
                 type="text"
@@ -569,175 +493,141 @@ export function PortfolioView({
                   setHighlightIndex(0);
                 }}
                 onKeyDown={handleKeyDown}
-                placeholder="พิมพ์ตัวย่อหรือชื่อบริษัท เช่น PEP, PepsiCo, QQQM, SMH, GLD, KCG, PTT, Nintendo, ASML..."
-                className="w-full bg-[#090C11] border border-[#253042] rounded-lg pl-10 pr-4 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/70 focus:ring-2 focus:ring-amber-500/20 transition-all"
+                placeholder="ค้นหาหุ้น/ETF เช่น QQQM, PEP, KCG, PTT..."
+                className="w-full min-h-[44px] bg-[#090C11] border border-[#253042] rounded-xl pl-9 pr-3 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/70"
                 aria-label="ค้นหาและเพิ่มสินทรัพย์"
               />
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
-              <select
-                value={customCategory}
-                onChange={(e) => setCustomCategory(e.target.value as AssetCategory)}
-                aria-label="ประเภทสำรองกรณีไม่ระบุหมวดอัตโนมัติ"
-                className="bg-[#090C11] border border-[#253042] rounded-lg px-3 py-2.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500/70 cursor-pointer"
-              >
-                <option value="US ETF">US ETF</option>
-                <option value="Thai Stock">หุ้นไทย (SET/mai)</option>
-                <option value="US Stock">หุ้นสหรัฐฯ/โลก</option>
-                <option value="Crypto">คริปโต</option>
-                <option value="Commodity">โภคภัณฑ์</option>
-                <option value="Forex">ค่าเงิน (FX)</option>
-              </select>
-
-              <button
-                type="button"
-                disabled={Boolean(classifyingTicker)}
-                onClick={() => {
-                  if (exactCatalogMatch) {
-                    void handleSelectCatalogItem(exactCatalogMatch);
-                  } else if (rawTrimmedQuery) {
-                    void handleGlobalAiSearchAndAdd();
-                  } else {
-                    focusSearchInput();
-                  }
-                }}
-                className="px-4 py-2.5 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 disabled:opacity-70 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                {classifyingTicker ? (
-                  <>
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>กำลังค้นหาทั่วโลก...</span>
-                  </>
-                ) : (
-                  <>
-                    <Plus className="w-4 h-4" />
-                    <span>เพิ่มสินทรัพย์</span>
-                  </>
-                )}
-              </button>
-            </div>
+            <button
+              type="button"
+              disabled={Boolean(classifyingTicker)}
+              onClick={() => {
+                if (exactCatalogMatch) {
+                  void handleSelectCatalogItem(exactCatalogMatch);
+                } else if (rawTrimmedQuery) {
+                  void handleGlobalAiSearchAndAdd();
+                } else {
+                  inputRef.current?.focus();
+                  setDropdownOpen(true);
+                }
+              }}
+              className="min-h-[44px] px-3.5 text-xs font-bold rounded-xl bg-amber-500 text-slate-950 hover:bg-amber-400 disabled:opacity-70 inline-flex items-center gap-1 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {classifyingTicker ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Plus className="w-4 h-4" />
+              )}
+              <span>เพิ่ม</span>
+            </button>
           </div>
 
-          {/* Optional Average Cost & Quantity inputs before adding */}
-          <div className="mt-2.5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-            <div className="flex items-center gap-2 bg-[#090C11] border border-[#1E2634] rounded-lg px-3 py-1.5">
-              <label
-                htmlFor="add-avg-cost"
-                className="text-[11px] text-slate-400 whitespace-nowrap shrink-0"
-              >
-                ทุนเฉลี่ย (ไม่บังคับ)
-              </label>
+          {/* Toggle Optional Avg Cost / Qty inputs */}
+          <div className="mt-2 flex items-center justify-between gap-2 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setShowCostInputs((v) => !v)}
+              className="text-amber-400 hover:text-amber-300 font-medium inline-flex items-center gap-1 cursor-pointer"
+            >
+              <span>{showCostInputs ? 'ซ่อนช่องกรอกต้นทุน' : '+ ใส่ราคาทุนเฉลี่ย (ไม่บังคับ)'}</span>
+              {showCostInputs ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+
+            <select
+              value={customCategory}
+              onChange={(e) => setCustomCategory(e.target.value as AssetCategory)}
+              aria-label="หมวดหมู่สำรอง"
+              className="bg-[#090C11] border border-[#222C3D] rounded-lg px-2 py-1 text-[11px] text-slate-300 focus:outline-none cursor-pointer"
+            >
+              <option value="US ETF">US ETF</option>
+              <option value="Thai Stock">หุ้นไทย</option>
+              <option value="US Stock">หุ้นสหรัฐฯ</option>
+              <option value="Crypto">คริปโต</option>
+              <option value="Commodity">โภคภัณฑ์</option>
+              <option value="Forex">ค่าเงิน</option>
+            </select>
+          </div>
+
+          {showCostInputs && (
+            <div className="mt-2 grid grid-cols-2 gap-2">
               <input
-                id="add-avg-cost"
                 type="number"
                 min="0"
                 step="any"
                 value={addAvgCostInput}
                 onChange={(e) => setAddAvgCostInput(e.target.value)}
-                placeholder="เช่น 152.50 หรือ 8.60"
-                className="w-full bg-transparent text-xs font-mono tabular-nums text-slate-100 placeholder:text-slate-600 focus:outline-none text-right"
+                placeholder="ทุนเฉลี่ย เช่น 152.5"
+                className="min-h-[40px] bg-[#090C11] border border-[#222C3D] rounded-xl px-3 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500"
               />
-            </div>
-
-            <div className="flex items-center gap-2 bg-[#090C11] border border-[#1E2634] rounded-lg px-3 py-1.5">
-              <label
-                htmlFor="add-qty"
-                className="text-[11px] text-slate-400 whitespace-nowrap shrink-0"
-              >
-                จำนวนหน่วย (ไม่บังคับ)
-              </label>
               <input
-                id="add-qty"
                 type="number"
                 min="0"
                 step="any"
                 value={addQtyInput}
                 onChange={(e) => setAddQtyInput(e.target.value)}
-                placeholder="เช่น 10 หรือ 500"
-                className="w-full bg-transparent text-xs font-mono tabular-nums text-slate-100 placeholder:text-slate-600 focus:outline-none text-right"
+                placeholder="จำนวนหน่วย เช่น 10"
+                className="min-h-[40px] bg-[#090C11] border border-[#222C3D] rounded-xl px-3 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-amber-500"
               />
             </div>
-
-            <div className="hidden lg:flex items-center text-[11px] text-slate-500 px-1">
-              กรอกไว้เพื่อคำนวณกำไร/ขาดทุนรวม และวาดเส้นจุดคุ้มทุนบนกราฟเทคนิคอัตโนมัติ
-            </div>
-          </div>
+          )}
 
           {/* Autocomplete Dropdown */}
           {dropdownOpen && (
-            <div className="absolute z-40 left-0 right-0 mt-2 bg-[#121823] border border-[#2A364B] rounded-xl shadow-2xl overflow-hidden max-h-96 overflow-y-auto">
-              <div className="px-3.5 py-2 bg-[#0D121A] border-b border-[#1E2634] flex items-center justify-between text-[11px] text-slate-400">
-                <span>
-                  {rawTrimmedQuery
-                    ? `ผลการค้นหา "${rawTrimmedQuery}" (${suggestions.length} รายการในคลัง)`
-                    : `สินทรัพย์ยอดนิยม (${ASSET_CATALOG.length}+ รายการทั่วโลก)`}
-                </span>
-                <span>กด ดูกราฟ หรือ Enter เพื่อเพิ่ม</span>
-              </div>
-
+            <div className="absolute z-40 left-0 right-0 mt-2 bg-[#121823] border border-[#2A364B] rounded-2xl shadow-2xl overflow-hidden max-h-80 overflow-y-auto">
               {suggestions.map((item, idx) => {
                 const alreadyHeld = isAlreadyHeld(item.symbol);
-                const isHighlighted = idx === highlightIndex;
                 return (
                   <div
                     key={item.symbol}
-                    role="option"
-                    aria-selected={isHighlighted}
                     onMouseEnter={() => setHighlightIndex(idx)}
-                    className={`w-full px-3.5 py-2.5 flex items-center justify-between gap-3 transition-colors border-b border-[#1A2230]/60 last:border-b-0 ${
-                      isHighlighted ? 'bg-[#1A2434]' : 'hover:bg-[#161E2C]'
+                    className={`px-3.5 py-2.5 flex items-center justify-between gap-2 border-b border-[#1A2230]/70 last:border-b-0 ${
+                      idx === highlightIndex ? 'bg-[#1A2434]' : ''
                     }`}
                   >
                     <button
                       type="button"
                       onClick={() => void handleSelectCatalogItem(item)}
-                      className="flex items-center gap-3 min-w-0 flex-1 text-left cursor-pointer"
+                      className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
                     >
                       <span className="text-base shrink-0">{item.flag}</span>
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-sm font-semibold text-slate-100">
-                            {item.symbol}
-                          </span>
-                          <span className="text-[11px] text-slate-400">
-                            {item.market}
-                          </span>
-                          <span className="text-[11px] text-amber-300/90">
-                            {CATEGORY_LABELS_TH[item.category]}
+                        <div className="font-mono text-xs font-bold text-slate-100">
+                          {item.symbol}{' '}
+                          <span className="font-sans font-normal text-[11px] text-slate-400">
+                            · {item.market}
                           </span>
                         </div>
-                        <div className="text-xs text-slate-400 truncate">
-                          {item.name} · {item.sector}
-                        </div>
+                        <div className="text-[11px] text-slate-400 truncate">{item.name}</div>
                       </div>
                     </button>
 
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <button
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          openChartForCatalogItem(item);
+                          openTrendForCatalogItem(item);
                         }}
-                        className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-[#101621] border border-[#273449] text-sky-300 hover:border-sky-500/60 hover:bg-sky-500/10 inline-flex items-center gap-1 whitespace-nowrap cursor-pointer transition-colors"
+                        className="px-2 py-1.5 rounded-lg text-[11px] font-medium bg-[#0D121A] border border-amber-500/35 text-amber-300 whitespace-nowrap cursor-pointer"
                       >
-                        <LineChart className="w-3 h-3" />
-                        <span>ดูกราฟ</span>
+                        🎯 เทรน &amp; Fib
                       </button>
-
                       {alreadyHeld ? (
-                        <span className="text-[11px] text-emerald-400 font-medium px-1.5">
-                          มีในพอร์ตแล้ว
+                        <span className="text-[11px] text-emerald-400 font-medium px-1">
+                          มีแล้ว
                         </span>
                       ) : (
                         <button
                           type="button"
                           onClick={() => void handleSelectCatalogItem(item)}
-                          className="text-xs text-amber-400 hover:text-amber-300 font-medium inline-flex items-center gap-0.5 px-1.5 py-1 cursor-pointer"
+                          className="px-2 py-1.5 rounded-lg bg-amber-500 text-slate-950 text-[11px] font-bold cursor-pointer"
                         >
-                          <Plus className="w-3.5 h-3.5" />
-                          <span>เพิ่ม</span>
+                          + เพิ่ม
                         </button>
                       )}
                     </div>
@@ -746,87 +636,44 @@ export function PortfolioView({
               })}
 
               {showGlobalAiSearchRow && (
-                <div
-                  onMouseEnter={() => setHighlightIndex(suggestions.length)}
-                  className={`w-full px-3.5 py-3 flex items-center justify-between gap-3 bg-amber-500/12 border-t border-amber-500/25 transition-colors ${
-                    highlightIndex === suggestions.length ? 'bg-amber-500/20' : ''
-                  }`}
-                >
+                <div className="px-3.5 py-3 bg-amber-500/12 border-t border-amber-500/25 flex items-center justify-between gap-2">
                   <button
                     type="button"
                     onClick={() => void handleGlobalAiSearchAndAdd()}
-                    className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
+                    className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
                   >
                     <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-                    <div className="min-w-0">
-                      <div className="text-xs sm:text-sm font-semibold text-amber-200">
-                        ค้นหาและเพิ่ม &quot;{rawTrimmedQuery}&quot; จากตลาดทั่วโลก (Yahoo + AI)
-                      </div>
-                      <div className="text-[11px] text-slate-400 mt-0.5">
-                        ค้นหาผ่าน Yahoo Finance Autocomplete ฟรี แล้วเสริมข้อมูลกลุ่มอุตสาหกรรมและเพิ่มเข้าพอร์ตอัตโนมัติ
-                      </div>
-                    </div>
+                    <span className="text-xs font-semibold text-amber-200 truncate">
+                      ค้นหา &quot;{rawTrimmedQuery}&quot; ทั่วโลก
+                    </span>
                   </button>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {canQuickPreviewQueryChart && (
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {canQuickPreviewQuery && (
                       <button
                         type="button"
-                        onClick={openQuickChartForQuery}
-                        className="px-2.5 py-1 rounded-md text-[11px] font-medium bg-[#101621] border border-[#273449] text-sky-300 hover:border-sky-500/60 inline-flex items-center gap-1 whitespace-nowrap cursor-pointer"
+                        onClick={openQuickTrendForQuery}
+                        className="px-2 py-1 rounded-lg bg-[#0D121A] border border-amber-500/35 text-[11px] text-amber-300 cursor-pointer"
                       >
-                        <LineChart className="w-3 h-3" />
-                        <span>ดูกราฟ</span>
+                        🎯 เทรน &amp; Fib
                       </button>
                     )}
                     <button
                       type="button"
                       onClick={() => void handleGlobalAiSearchAndAdd()}
-                      className="text-xs font-semibold text-amber-300 hover:text-amber-200 whitespace-nowrap cursor-pointer"
+                      className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 text-[11px] font-bold cursor-pointer"
                     >
-                      ค้นหา &amp; เพิ่ม
+                      เพิ่ม
                     </button>
                   </div>
                 </div>
               )}
             </div>
           )}
-
-          {/* Direct Inline AI Search CTA when query has no catalog matches and dropdown is closed */}
-          {!dropdownOpen && showGlobalAiSearchRow && suggestions.length === 0 && !classifyingTicker && (
-            <div className="mt-2.5 px-3.5 py-2.5 rounded-lg bg-amber-500/12 border border-amber-500/35 flex flex-wrap items-center justify-between gap-3">
-              <button
-                type="button"
-                onClick={() => void handleGlobalAiSearchAndAdd()}
-                className="text-xs sm:text-sm font-medium text-amber-200 hover:text-amber-100 text-left flex-1 min-w-0 cursor-pointer"
-              >
-                ค้นหาและเพิ่ม &quot;{rawTrimmedQuery}&quot; จากตลาดทั่วโลก (Yahoo Finance + AI)
-              </button>
-              <div className="flex items-center gap-2 shrink-0">
-                {canQuickPreviewQueryChart && (
-                  <button
-                    type="button"
-                    onClick={openQuickChartForQuery}
-                    className="px-2.5 py-1 rounded-md text-xs font-medium bg-[#101621] border border-[#273449] text-sky-300 hover:border-sky-500/60 inline-flex items-center gap-1 whitespace-nowrap cursor-pointer"
-                  >
-                    <LineChart className="w-3.5 h-3.5" />
-                    <span>ดูกราฟ</span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => void handleGlobalAiSearchAndAdd()}
-                  className="text-xs font-semibold text-amber-300 hover:text-amber-200 whitespace-nowrap cursor-pointer"
-                >
-                  ค้นหา &amp; เพิ่ม
-                </button>
-              </div>
-            </div>
-          )}
         </div>
 
-        {/* Quick-add popular tickers */}
-        <div className="mt-3.5 flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-slate-500">เพิ่มด่วนยอดนิยม:</span>
+        {/* Single-Row Horizontal Quick-Add Tickers */}
+        <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap no-scrollbar pt-0.5">
+          <span className="text-[11px] text-slate-500 shrink-0">เพิ่มด่วน:</span>
           {POPULAR_STARTER_TICKERS.map((sym) => {
             const catItem = ASSET_CATALOG.find((c) => c.symbol === sym);
             if (!catItem) return null;
@@ -837,9 +684,9 @@ export function PortfolioView({
                 type="button"
                 disabled={held}
                 onClick={() => void handleSelectCatalogItem(catItem)}
-                className={`font-mono text-[11px] px-2.5 py-1 rounded-md border transition-colors whitespace-nowrap shrink-0 ${
+                className={`font-mono text-[11px] px-2.5 py-1.5 rounded-lg border shrink-0 transition-colors ${
                   held
-                    ? 'bg-[#0D121A] border-[#1A2230] text-slate-600 cursor-not-allowed'
+                    ? 'bg-[#090C11] border-[#1A2230] text-slate-600 cursor-not-allowed'
                     : 'bg-[#141C28] border-[#253042] text-slate-300 hover:border-amber-500/60 hover:text-amber-200 cursor-pointer'
                 }`}
               >
@@ -851,7 +698,7 @@ export function PortfolioView({
 
         {feedbackMsg && (
           <div
-            className={`mt-3 text-xs rounded-lg px-3.5 py-2 border ${
+            className={`text-xs rounded-xl px-3 py-2 border ${
               feedbackMsg.type === 'success'
                 ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30'
                 : 'text-rose-300 bg-rose-500/10 border-rose-500/30'
@@ -862,73 +709,53 @@ export function PortfolioView({
         )}
       </section>
 
-      {/* Currency-Grouped Portfolio Cost & Unrealized P/L Summary Strip */}
+      {/* Currency-Grouped Portfolio P/L Summary */}
       {portfolioPnlSummaries.length > 0 && (
-        <section className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+        <section className="grid grid-cols-1 gap-2.5">
           {portfolioPnlSummaries.map((summary) => {
-            const hasFullPositions = summary.fullPositionCount > 0 && summary.totalCost > 0;
+            const hasFull = summary.fullPositionCount > 0 && summary.totalCost > 0;
             const isProfit = summary.unrealizedPnl > 0;
             const isLoss = summary.unrealizedPnl < 0;
-
             return (
               <div
                 key={summary.currency}
-                className="bg-[#10151E] border border-[#1E2634] rounded-xl px-5 py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                className="bg-[#10151E] border border-[#1E2634] rounded-2xl p-4 flex items-center justify-between gap-3"
               >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-semibold text-slate-300">
-                      สรุปต้นทุน &amp; กำไร/ขาดทุนพอร์ต ({summary.currency})
-                    </span>
-                    <span className="text-[11px] font-mono tabular-nums text-slate-500">
-                      {summary.fullPositionCount + summary.costOnlyCount} สินทรัพย์ที่บันทึกทุน
-                    </span>
+                <div className="space-y-0.5 min-w-0">
+                  <div className="text-xs font-semibold text-slate-300">
+                    พอร์ตสกุล {summary.currency}
                   </div>
-
-                  {hasFullPositions ? (
-                    <div className="flex flex-wrap items-baseline gap-x-5 gap-y-1 text-xs">
-                      <div>
-                        <span className="text-slate-500 mr-1.5">ต้นทุนรวม</span>
-                        <span className="font-mono tabular-nums text-slate-200 font-semibold">
-                          {formatLivePrice(summary.totalCost, summary.currency)}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 mr-1.5">มูลค่าตลาด</span>
-                        <span className="font-mono tabular-nums text-slate-100 font-semibold">
-                          {formatLivePrice(summary.totalMarketValue, summary.currency)}
-                        </span>
-                      </div>
+                  {hasFull ? (
+                    <div className="text-[11px] text-slate-400 font-mono tabular-nums">
+                      ทุน {formatCurrencyPrice(summary.totalCost, summary.currency)} → ตลาด{' '}
+                      <span className="text-slate-100 font-semibold">
+                        {formatCurrencyPrice(summary.totalMarketValue, summary.currency)}
+                      </span>
                     </div>
                   ) : (
-                    <p className="text-xs text-slate-400">
-                      บันทึกทุนเฉลี่ยแล้ว — ระบุจำนวนหน่วยและอัปเดตราคาสดเพื่อคำนวณมูลค่ารวม
-                    </p>
+                    <div className="text-[11px] text-slate-500">
+                      บันทึกทุนแล้ว {summary.costOnlyCount} รายการ
+                    </div>
                   )}
                 </div>
 
-                {hasFullPositions && (
-                  <div className="sm:text-right shrink-0">
-                    <div className="text-[11px] text-slate-500">กำไร/ขาดทุนยังไม่รับรู้</div>
-                    <div
-                      className={`font-mono tabular-nums text-base font-bold inline-flex items-center gap-1.5 ${
-                        isProfit
-                          ? 'text-emerald-400'
-                          : isLoss
-                          ? 'text-rose-400'
-                          : 'text-slate-300'
-                      }`}
-                    >
+                {hasFull && (
+                  <div
+                    className={`text-right font-mono tabular-nums shrink-0 ${
+                      isProfit ? 'text-emerald-400' : isLoss ? 'text-rose-400' : 'text-slate-300'
+                    }`}
+                  >
+                    <div className="text-sm font-bold inline-flex items-center gap-1">
                       {isProfit ? (
-                        <TrendingUp className="w-4 h-4 shrink-0" />
+                        <TrendingUp className="w-3.5 h-3.5" />
                       ) : isLoss ? (
-                        <TrendingDown className="w-4 h-4 shrink-0" />
+                        <TrendingDown className="w-3.5 h-3.5" />
                       ) : null}
                       <span>{formatSignedMoney(summary.unrealizedPnl, summary.currency)}</span>
-                      <span className="text-xs font-semibold">
-                        ({summary.unrealizedPnlPct > 0 ? '+' : ''}
-                        {summary.unrealizedPnlPct.toFixed(2)}%)
-                      </span>
+                    </div>
+                    <div className="text-[11px] font-semibold">
+                      ({summary.unrealizedPnlPct > 0 ? '+' : ''}
+                      {summary.unrealizedPnlPct.toFixed(2)}%)
                     </div>
                   </div>
                 )}
@@ -938,363 +765,291 @@ export function PortfolioView({
         </section>
       )}
 
-      {/* Portfolio List & Live Alerts */}
-      <section className="bg-[#10151E] border border-[#1E2634] rounded-xl overflow-hidden">
-        <div className="px-5 py-4 border-b border-[#1E2634] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-slate-100">
-              สินทรัพย์ที่ถือครองจริง ({portfolio.length})
-            </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              ระบบวิเคราะห์ความเชื่อมโยงทางตรง/ทางอ้อมกับปฏิทินเศรษฐกิจ ข่าวโลก ราคาทุนเฉลี่ย และกราฟเทคนิค Elliott Wave ตามพอร์ตจริงนี้
-            </p>
-          </div>
-
-          {portfolio.length > 0 && (
-            <div className="flex items-center gap-1 p-1 bg-[#090C11] border border-[#1E2634] rounded-lg overflow-x-auto">
-              {FILTER_CATEGORIES.map((cat) => {
-                const active = activeCategoryFilter === cat;
-                const label = cat === 'ALL' ? 'ทั้งหมด' : CATEGORY_LABELS_TH[cat];
-                return (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setActiveCategoryFilter(cat)}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      active
-                        ? 'bg-[#1C2536] text-amber-300'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {portfolio.length === 0 ? (
-          /* Clean 100% Empty State */
-          <div className="py-14 px-6 text-center max-w-xl mx-auto space-y-4">
-            <div className="w-12 h-12 rounded-xl bg-amber-500/12 border border-amber-500/30 flex items-center justify-center mx-auto">
-              <Plus className="w-6 h-6 text-amber-400" />
-            </div>
-            <div>
-              <h3 className="text-base font-semibold text-slate-100">
-                พอร์ตโฟลิโอของคุณยังว่างอยู่
-              </h3>
-              <p className="text-xs sm:text-sm text-slate-400 mt-1 leading-relaxed">
-                เริ่มต้นเพิ่มสินทรัพย์จริงที่คุณถือครอง เช่น QQQM, SMH, GLD, SLV, BLOK, PEP หรือหุ้นไทยอย่าง KCG, PTT เพื่อเปิดระบบ Smart Portfolio Alert การคำนวณจุดคุ้มทุน และกราฟเทคนิค Elliott Wave
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+      {/* Single-Row Horizontal Scrollable Category Filter Tabs */}
+      {portfolio.length > 0 && (
+        <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap no-scrollbar py-0.5">
+          {FILTER_CATEGORIES.map((cat) => {
+            const active = activeCategoryFilter === cat;
+            const label = cat === 'ALL' ? `ทั้งหมด (${portfolio.length})` : CATEGORY_LABELS_TH[cat];
+            return (
               <button
+                key={cat}
                 type="button"
-                onClick={focusSearchInput}
-                className="px-4 py-2.5 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                onClick={() => setActiveCategoryFilter(cat)}
+                className={`px-3.5 min-h-[38px] text-xs font-medium rounded-xl border transition-colors shrink-0 cursor-pointer ${
+                  active
+                    ? 'bg-amber-500 text-slate-950 border-amber-500 font-semibold'
+                    : 'bg-[#10151E] border-[#1E2634] text-slate-400 hover:text-slate-100'
+                }`}
               >
-                <Plus className="w-4 h-4" />
-                <span>+ เพิ่มสินทรัพย์ในพอร์ต</span>
+                {label}
               </button>
-              {!isSignedInLocal && (
-                <button
-                  type="button"
-                  onClick={onOpenAuth}
-                  className="px-4 py-2.5 text-xs font-medium rounded-lg bg-[#161E2B] border border-[#253042] text-slate-200 hover:border-amber-500/50 transition-colors cursor-pointer"
-                >
-                  เข้าสู่ระบบ / สมัครสมาชิก (แยกพอร์ตตามบัญชี)
-                </button>
-              )}
-            </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Single-Column Portfolio Asset Cards */}
+      {portfolio.length === 0 ? (
+        <section className="bg-[#10151E] border border-[#1E2634] rounded-2xl p-6 text-center space-y-3">
+          <div className="w-11 h-11 rounded-xl bg-amber-500/12 border border-amber-500/30 flex items-center justify-center mx-auto">
+            <Plus className="w-5 h-5 text-amber-400" />
           </div>
-        ) : filteredPortfolio.length === 0 ? (
-          <div className="py-10 px-6 text-center text-sm text-slate-400">
-            ไม่พบสินทรัพย์ในหมวดหมู่ที่เลือก
-          </div>
-        ) : (
-          <div className="divide-y divide-[#1A2230]">
-            {filteredPortfolio.map((asset) => {
-              const alert = getAlertsForAsset(asset, calendarEvents, newsItems);
-              const quote = liveQuotes[asset.symbol.toUpperCase()];
-              const currency = quote?.currency || asset.currency;
-              const totalCalCount =
-                alert.earningsCount +
-                alert.dividendCount +
-                alert.economicDirectCount +
-                alert.economicIndirectCount;
+          <h3 className="text-sm font-bold text-slate-100">พอร์ตโฟลิโอของคุณยังว่างอยู่</h3>
+          <p className="text-xs text-slate-400 leading-relaxed">
+            เพิ่มหุ้นไทยหรือต่างประเทศที่ถือครอง เพื่อวิเคราะห์เทรน EMA เป้า Fibonacci และรับแจ้งเตือนงบ/XD
+          </p>
+          {!isSignedInLocal && (
+            <button
+              type="button"
+              onClick={onOpenAuth}
+              className="min-h-[40px] px-4 rounded-xl bg-[#161E2B] border border-[#253042] text-xs text-slate-200 hover:border-amber-500/40 cursor-pointer"
+            >
+              สมัครสมาชิกแยกพอร์ตส่วนตัว
+            </button>
+          )}
+        </section>
+      ) : filteredPortfolio.length === 0 ? (
+        <div className="bg-[#10151E] border border-[#1E2634] rounded-2xl p-5 text-center text-xs text-slate-400">
+          ไม่มีสินทรัพย์ในหมวดหมู่นี้
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3">
+          {filteredPortfolio.map((asset) => {
+            const quote = liveQuotes[asset.symbol.toUpperCase()];
+            const currency = quote?.currency || asset.currency || 'USD';
+            const alert = getAlertsForAsset(asset, calendarEvents, newsItems);
+            const expanded = Boolean(expandedIds[asset.id]);
+            const isEditingCost = editingCostId === asset.id;
 
-              const hasCost = typeof asset.averageCost === 'number' && asset.averageCost > 0;
-              const hasQty = typeof asset.quantity === 'number' && asset.quantity > 0;
-              const livePrice = quote?.price ?? null;
-              const pnlPct =
-                hasCost && livePrice !== null
-                  ? ((livePrice - asset.averageCost!) / asset.averageCost!) * 100
-                  : null;
-              const marketValue =
-                hasQty && livePrice !== null ? livePrice * asset.quantity! : null;
-              const totalCost = hasCost && hasQty ? asset.averageCost! * asset.quantity! : null;
-              const unrealizedDelta =
-                marketValue !== null && totalCost !== null ? marketValue - totalCost : null;
-              const isEditingThis = editingCostId === asset.id;
+            const hasCost = typeof asset.averageCost === 'number' && asset.averageCost > 0;
+            const hasLive = Boolean(quote && quote.price !== null);
+            const pnlPct =
+              hasCost && hasLive && quote?.price !== null
+                ? ((quote.price - asset.averageCost!) / asset.averageCost!) * 100
+                : null;
+            const pnlMoney =
+              hasCost && hasLive && quote?.price !== null && asset.quantity
+                ? (quote.price - asset.averageCost!) * asset.quantity
+                : null;
 
-              return (
-                <div
-                  key={asset.id}
-                  className="px-5 py-4 hover:bg-[#141B27] transition-colors space-y-3"
-                >
-                  <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
-                    {/* Asset Identity */}
-                    <div className="flex items-start gap-3.5 min-w-0">
-                      <div className="w-10 h-10 rounded-lg bg-[#161E2B] border border-[#243043] flex items-center justify-center text-lg shrink-0">
-                        {asset.flag}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-mono text-base font-semibold text-slate-100">
-                            {asset.symbol}
-                          </span>
-                          {quote && quote.price !== null && (
-                            <span className="inline-flex items-center gap-1.5 font-mono tabular-nums text-xs font-semibold text-slate-100 bg-[#161E2B] border border-[#273347] px-2 py-0.5 rounded whitespace-nowrap">
-                              <span>{formatLivePrice(quote.price, currency)}</span>
-                              {quote.changePercent !== null && (
-                                <span
-                                  className={
-                                    quote.changePercent > 0
-                                      ? 'text-emerald-400'
-                                      : quote.changePercent < 0
-                                      ? 'text-rose-400'
-                                      : 'text-slate-400'
-                                  }
-                                >
-                                  {quote.changePercent > 0 ? '+' : ''}
-                                  {quote.changePercent.toFixed(2)}%
-                                </span>
-                              )}
-                            </span>
-                          )}
-                          {quote?.dividendYield && (
-                            <span className="inline-flex items-center font-mono tabular-nums text-[11px] font-medium text-amber-300 bg-amber-500/12 border border-amber-500/30 px-2 py-0.5 rounded whitespace-nowrap">
-                              Yield {quote.dividendYield}
-                            </span>
-                          )}
-                          <span className="text-xs text-slate-400">
-                            {CATEGORY_LABELS_TH[asset.category]}
-                            <span className="mx-1.5 text-slate-600" aria-hidden="true">·</span>
-                            {asset.market}
-                          </span>
-                          {alert.earningsCount > 0 && (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-sky-300 bg-sky-500/15 border border-sky-500/35 px-2 py-0.5 rounded whitespace-nowrap">
-                              <BellRing className="w-3 h-3" />
-                              ใกล้ประกาศงบ
-                            </span>
-                          )}
-                          {alert.dividendCount > 0 && (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-300 bg-emerald-500/15 border border-emerald-500/35 px-2 py-0.5 rounded whitespace-nowrap">
-                              <BellRing className="w-3 h-3" />
-                              ใกล้ขึ้น XD ปันผล
-                            </span>
-                          )}
-                          {alert.economicDirectCount > 0 && (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-300 bg-amber-500/15 border border-amber-500/35 px-2 py-0.5 rounded whitespace-nowrap">
-                              กระทบทางตรง {alert.economicDirectCount}
-                            </span>
-                          )}
-                          {alert.economicIndirectCount > 0 && (
-                            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-300 bg-sky-500/12 border border-sky-500/30 px-2 py-0.5 rounded whitespace-nowrap">
-                              ทางอ้อม {alert.economicIndirectCount}
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="text-xs text-slate-300 mt-0.5 truncate">
-                          {asset.name}
-                        </div>
-                        <div className="text-[11px] text-slate-500 mt-0.5 truncate">
-                          กลุ่มอุตสาหกรรม: {asset.sector}
-                        </div>
-
-                        {/* Breakeven Cost & Unrealized P/L Strip on Card */}
-                        {hasCost && (
-                          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs bg-[#0C1119] border border-[#1E2634] rounded-lg px-3 py-1.5">
-                            <span className="text-slate-400">
-                              ทุนเฉลี่ย:{' '}
-                              <span className="font-mono tabular-nums font-semibold text-amber-300">
-                                {formatLivePrice(asset.averageCost!, currency)}
-                              </span>
-                            </span>
-
-                            {hasQty && (
-                              <span className="text-slate-400">
-                                จำนวน:{' '}
-                                <span className="font-mono tabular-nums text-slate-200 font-medium">
-                                  {asset.quantity!.toLocaleString('en-US')} หน่วย
-                                </span>
-                              </span>
-                            )}
-
-                            {marketValue !== null && (
-                              <span className="text-slate-400">
-                                มูลค่าตลาด:{' '}
-                                <span className="font-mono tabular-nums text-slate-100 font-medium">
-                                  {formatLivePrice(marketValue, currency)}
-                                </span>
-                              </span>
-                            )}
-
-                            {pnlPct !== null ? (
-                              <span
-                                className={`font-mono tabular-nums font-semibold inline-flex items-center gap-1 ${
-                                  pnlPct > 0
-                                    ? 'text-emerald-400'
-                                    : pnlPct < 0
-                                    ? 'text-rose-400'
-                                    : 'text-slate-300'
-                                }`}
-                              >
-                                <span>
-                                  P/L: {pnlPct > 0 ? '+' : ''}
-                                  {pnlPct.toFixed(2)}%
-                                </span>
-                                {unrealizedDelta !== null && (
-                                  <span>({formatSignedMoney(unrealizedDelta, currency)})</span>
-                                )}
-                              </span>
-                            ) : (
-                              <span className="text-[11px] text-slate-500">
-                                รอราคาสดเพื่อคำนวณ P/L
-                              </span>
-                            )}
-                          </div>
-                        )}
-
-                        {alert.nextEventTitle && (
-                          <div className="text-xs text-amber-200/90 mt-1.5 flex items-center gap-1.5">
-                            <Calendar className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                            <span className="truncate">
-                              ใกล้สุด ({alert.nextEventDate ? formatThaiShortDate(alert.nextEventDate) : ''}): {alert.nextEventTitle}
-                            </span>
-                          </div>
-                        )}
-                      </div>
+            return (
+              <article
+                key={asset.id}
+                className="bg-[#10151E] border border-[#1E2634] rounded-2xl p-4 space-y-3"
+              >
+                {/* Element 1: Flag + Ticker/Name + Live Price & % */}
+                <div className="flex items-start justify-between gap-2.5">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-base shrink-0">{asset.flag}</span>
+                      <span className="font-mono text-sm font-bold text-slate-100">
+                        {asset.symbol}
+                      </span>
+                      <span className="text-[11px] text-slate-500">{asset.market}</span>
                     </div>
-
-                    {/* Quick Actions */}
-                    <div className="flex flex-wrap items-center gap-2 lg:justify-end shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => openChartForPortfolioAsset(asset)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-sky-200 bg-sky-500/12 border border-sky-500/35 hover:bg-sky-500/20 hover:border-sky-400/60 transition-colors whitespace-nowrap cursor-pointer"
-                      >
-                        <LineChart className="w-3.5 h-3.5 text-sky-400" />
-                        <span>ดูกราฟ &amp; วิเคราะห์เทคนิค</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          isEditingThis ? setEditingCostId(null) : startEditingCost(asset)
-                        }
-                        className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs border transition-colors whitespace-nowrap cursor-pointer ${
-                          isEditingThis
-                            ? 'text-amber-200 bg-amber-500/15 border-amber-500/40'
-                            : 'text-slate-300 bg-[#161E2B] border-[#243043] hover:border-amber-500/50 hover:text-amber-200'
-                        }`}
-                      >
-                        <Pencil className="w-3 h-3 text-amber-400" />
-                        <span>{hasCost ? 'แก้ไขทุน' : 'ใส่ทุนเฉลี่ย'}</span>
-                      </button>
-
-                      {totalCalCount > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => onNavigate('calendar', { onlyPortfolio: true })}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-300 bg-[#161E2B] border border-[#243043] hover:border-amber-500/50 hover:text-amber-200 transition-colors whitespace-nowrap cursor-pointer"
-                        >
-                          <Calendar className="w-3.5 h-3.5 text-amber-400" />
-                          <span>ปฏิทิน ({totalCalCount})</span>
-                        </button>
-                      )}
-                      {alert.newsCount > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => onNavigate('news', { onlyPortfolio: true })}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-300 bg-[#161E2B] border border-[#243043] hover:border-sky-500/50 hover:text-sky-200 transition-colors whitespace-nowrap cursor-pointer"
-                        >
-                          <Newspaper className="w-3.5 h-3.5 text-sky-400" />
-                          <span>ข่าว ({alert.newsCount})</span>
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => void onRemoveAsset(asset.id)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors cursor-pointer"
-                        aria-label={`ลบ ${asset.symbol} ออกจากพอร์ต`}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>ลบ</span>
-                      </button>
-                    </div>
+                    <div className="text-xs text-slate-400 truncate mt-0.5">{asset.name}</div>
                   </div>
 
-                  {/* Inline Average Cost & Quantity Editor */}
-                  {isEditingThis && (
-                    <div className="bg-[#0B1018] border border-[#253042] rounded-lg p-3 flex flex-col sm:flex-row sm:items-center gap-2.5">
-                      <div className="flex items-center gap-2 flex-1">
-                        <label className="text-[11px] text-slate-400 whitespace-nowrap">
-                          ราคาทุนเฉลี่ย ({currency})
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="any"
-                          value={editCostValue}
-                          onChange={(e) => setEditCostValue(e.target.value)}
-                          placeholder="เช่น 152.50"
-                          className="w-full sm:w-36 bg-[#090C11] border border-[#253042] rounded-md px-2.5 py-1.5 text-xs font-mono tabular-nums text-slate-100 focus:outline-none focus:border-amber-500/70"
-                        />
-                      </div>
-                      <div className="flex items-center gap-2 flex-1">
-                        <label className="text-[11px] text-slate-400 whitespace-nowrap">
-                          จำนวนหน่วย
-                        </label>
-                        <input
-                          type="number"
-                          min="0"
-                          step="any"
-                          value={editQtyValue}
-                          onChange={(e) => setEditQtyValue(e.target.value)}
-                          placeholder="เช่น 10"
-                          className="w-full sm:w-32 bg-[#090C11] border border-[#253042] rounded-md px-2.5 py-1.5 text-xs font-mono tabular-nums text-slate-100 focus:outline-none focus:border-amber-500/70"
-                        />
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleSaveCostEdit(asset)}
-                          className="px-3 py-1.5 rounded-md text-xs font-semibold bg-amber-500 text-slate-950 hover:bg-amber-400 inline-flex items-center gap-1 cursor-pointer"
+                  <div className="text-right shrink-0">
+                    {hasLive && quote?.price !== null ? (
+                      <>
+                        <div className="font-mono tabular-nums text-sm font-bold text-slate-100">
+                          {formatCurrencyPrice(quote.price, currency)}
+                        </div>
+                        {quote.changePercent !== null && (
+                          <div
+                            className={`font-mono tabular-nums text-[11px] font-semibold ${
+                              quote.changePercent > 0
+                                ? 'text-emerald-400'
+                                : quote.changePercent < 0
+                                ? 'text-rose-400'
+                                : 'text-slate-400'
+                            }`}
+                          >
+                            {quote.changePercent > 0 ? '+' : ''}
+                            {quote.changePercent.toFixed(2)}%
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-[11px] text-slate-500">รอดึงราคา</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Element 2: Concise Status / Breakeven P/L (<= 2 lines) */}
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  {hasCost ? (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-slate-400 font-mono text-[11px]">
+                        ทุน {formatCurrencyPrice(asset.averageCost!, currency)}
+                      </span>
+                      {pnlPct !== null && (
+                        <span
+                          className={`font-mono text-[11px] font-bold px-2 py-0.5 rounded-md ${
+                            pnlPct >= 0
+                              ? 'bg-emerald-500/12 text-emerald-300'
+                              : 'bg-rose-500/12 text-rose-300'
+                          }`}
                         >
-                          <Check className="w-3.5 h-3.5" />
-                          <span>บันทึกทุน</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setEditingCostId(null)}
-                          className="px-2.5 py-1.5 rounded-md text-xs text-slate-400 hover:text-slate-200 bg-[#141C28] border border-[#253042] inline-flex items-center gap-1 cursor-pointer"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                          <span>ยกเลิก</span>
-                        </button>
-                      </div>
+                          {pnlPct >= 0 ? '+' : ''}
+                          {pnlPct.toFixed(2)}%
+                          {pnlMoney !== null ? ` (${formatSignedMoney(pnlMoney, currency)})` : ''}
+                        </span>
+                      )}
                     </div>
+                  ) : (
+                    <span className="text-[11px] text-slate-400 line-clamp-1">
+                      {alert.earningsCount > 0
+                        ? `ใกล้ประกาศงบ ${alert.nextEventDate ? formatThaiShortDate(alert.nextEventDate) : ''}`
+                        : alert.dividendCount > 0
+                        ? 'มีกำหนดปันผล XD ในปฏิทิน'
+                        : alert.economicDirectCount > 0
+                        ? `เชื่อมโยงปฏิทิน ${alert.economicDirectCount} รายการ`
+                        : `${CATEGORY_LABELS_TH[asset.category]} · ${asset.sector}`}
+                    </span>
                   )}
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </section>
+
+                {/* Element 3: Primary CTA Button + ดูเพิ่มเติม Toggle */}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openTrendForPortfolioAsset(asset)}
+                    className="flex-1 min-h-[44px] px-3 rounded-xl bg-amber-500/15 border border-amber-500/40 hover:bg-amber-500/25 text-amber-200 text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Target className="w-3.5 h-3.5 shrink-0" />
+                    <span>🎯 วิเคราะห์เทรน &amp; เป้า Fibonacci</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => toggleExpand(asset.id)}
+                    className="min-h-[44px] px-3 rounded-xl bg-[#090C11] border border-[#222C3D] text-xs text-slate-300 hover:text-slate-100 inline-flex items-center gap-1 shrink-0 cursor-pointer"
+                  >
+                    <span>{expanded ? 'ย่อ' : 'ดูเพิ่มเติม'}</span>
+                    {expanded ? (
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Progressive Disclosure Details */}
+                {expanded && (
+                  <div className="pt-3 border-t border-[#1B2331] space-y-3 text-xs">
+                    <div className="grid grid-cols-2 gap-2 text-[11px]">
+                      <div className="bg-[#090C11] border border-[#1B2331] rounded-xl p-2.5">
+                        <div className="text-slate-500">หมวดหมู่</div>
+                        <div className="text-slate-200 font-medium mt-0.5">
+                          {CATEGORY_LABELS_TH[asset.category]}
+                        </div>
+                      </div>
+                      <div className="bg-[#090C11] border border-[#1B2331] rounded-xl p-2.5">
+                        <div className="text-slate-500">กลุ่มอุตสาหกรรม</div>
+                        <div className="text-slate-200 font-medium mt-0.5 truncate">
+                          {asset.sector}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Inline Cost Editor */}
+                    {isEditingCost ? (
+                      <div className="bg-[#090C11] border border-[#253042] rounded-xl p-3 space-y-2.5">
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">
+                              ทุนเฉลี่ย ({currency})
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={editCostValue}
+                              onChange={(e) => setEditCostValue(e.target.value)}
+                              className="w-full min-h-[38px] bg-[#10151E] border border-[#253042] rounded-lg px-2.5 text-xs font-mono text-slate-100 focus:outline-none focus:border-amber-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">
+                              จำนวนหน่วย
+                            </label>
+                            <input
+                              type="number"
+                              min="0"
+                              step="any"
+                              value={editQtyValue}
+                              onChange={(e) => setEditQtyValue(e.target.value)}
+                              className="w-full min-h-[38px] bg-[#10151E] border border-[#253042] rounded-lg px-2.5 text-xs font-mono text-slate-100 focus:outline-none focus:border-amber-500"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditingCostId(null)}
+                            className="px-3 min-h-[36px] text-xs text-slate-400 cursor-pointer"
+                          >
+                            ยกเลิก
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSaveCostEdit(asset)}
+                            className="px-3.5 min-h-[36px] rounded-lg bg-amber-500 text-slate-950 font-bold text-xs inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Check className="w-3.5 h-3.5" />
+                            <span>บันทึก</span>
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => startEditingCost(asset)}
+                            className="min-h-[36px] px-2.5 rounded-lg bg-[#090C11] border border-[#222C3D] text-slate-200 hover:border-amber-500/40 inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Pencil className="w-3 h-3 text-amber-400" />
+                            <span>{hasCost ? 'แก้ทุนเฉลี่ย' : 'ใส่ทุนเฉลี่ย'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onNavigate('calendar', { onlyPortfolio: true })}
+                            className="min-h-[36px] px-2.5 rounded-lg bg-[#090C11] border border-[#222C3D] text-slate-300 inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Calendar className="w-3 h-3 text-sky-400" />
+                            <span>ปฏิทิน</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onNavigate('news', { searchQuery: asset.symbol })}
+                            className="min-h-[36px] px-2.5 rounded-lg bg-[#090C11] border border-[#222C3D] text-slate-300 inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Newspaper className="w-3 h-3 text-emerald-400" />
+                            <span>ข่าว</span>
+                          </button>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => void onRemoveAsset(asset.id)}
+                          className="min-h-[36px] px-2.5 rounded-lg bg-rose-500/10 border border-rose-500/25 text-rose-300 hover:bg-rose-500/20 inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>ลบออก</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
-

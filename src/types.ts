@@ -305,42 +305,46 @@ export interface ChartHistoryResponse {
   fetchedAt: string;
 }
 
-export interface WavePoint {
-  candleIndex: number;
-  timestamp: number;
-  price: number;
-  type: 'high' | 'low';
-  label: string;
+export type ChartTrendDirection = 'Uptrend' | 'Downtrend' | 'Sideway';
+
+export interface FibonacciRetracementLevels {
+  fib382: number;
+  fib500: number;
+  fib618: number;
 }
 
-export interface TechnicalStructureResult {
+export interface FibonacciExtensionLevels {
+  fib1272: number;
+  fib1618: number;
+}
+
+export interface TrendFibonacciResult {
   latestPrice: number;
+  ema20: number | null;
+  ema50: number | null;
+  trend: ChartTrendDirection;
+  trendTh: string;
   support1: number;
   support2: number;
   resistance1: number;
   resistance2: number;
-  pivot: number;
-  wavePattern: 'impulse' | 'correction' | 'insufficient';
-  waveDirection: 'up' | 'down' | 'sideway';
-  wavePoints: WavePoint[];
+  swingHigh: number;
+  swingLow: number;
+  fibRetracement: FibonacciRetracementLevels;
+  fibExtension: FibonacciExtensionLevels;
   breakevenDeltaAbs: number | null;
   breakevenDeltaPct: number | null;
+  nextFibTargetLabel: string;
+  nextFibTargetPrice: number;
+  distanceToNextFibPct: number;
 }
-
-export type ChartTrendDirection = 'Uptrend' | 'Downtrend' | 'Sideway';
 
 export interface ChartAiAnalysisResponse {
   symbol: string;
   timeframe: ChartTimeframe;
   trend: ChartTrendDirection;
   trendTh: string;
-  waveStatusTh: string;
-  invalidationLevel: string;
-  nextWaveTarget: string;
-  buyDcaZone: string;
-  takeProfitZone: string;
-  stopLossLevel: string;
-  breakevenAdviceTh: string;
+  shortPlanLinesTh: string[];
   summaryTh: string;
   analyzedAt: string;
   fromCache?: boolean;

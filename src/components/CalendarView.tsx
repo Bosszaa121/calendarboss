@@ -3,8 +3,6 @@ import {
   AlertCircle,
   ChevronDown,
   ChevronUp,
-  ExternalLink,
-  Filter,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -63,7 +61,6 @@ const COUNTRY_FILTER_OPTIONS: Array<{ code: string; flag: string; label: string 
   { code: 'EU', flag: '🇪🇺', label: 'ยุโรป' },
   { code: 'JP', flag: '🇯🇵', label: 'ญี่ปุ่น' },
   { code: 'GB', flag: '🇬🇧', label: 'อังกฤษ' },
-  { code: 'NZ', flag: '🇳🇿', label: 'นิวซีแลนด์' },
 ];
 
 const EVENT_CATEGORY_LABELS: Record<EventCategory, string> = {
@@ -82,7 +79,6 @@ export function CalendarView({
   onGoToPortfolio,
   isLoading,
   error,
-  sources,
   onRetrySync,
 }: CalendarViewProps) {
   const [dateTab, setDateTab] = useState<DateTabKey>('this_week');
@@ -91,7 +87,6 @@ export function CalendarView({
   const [countryFilter, setCountryFilter] = useState<string>('ALL');
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
 
-  // Compute live direct/indirect impacts AND directional forecasts (🟢 ขึ้น / 🔴 ลง / ⚪ คงที่)
   const eventAnalysisMap = useMemo(() => {
     const map = new Map<
       string,
@@ -165,14 +160,6 @@ export function CalendarView({
     eventAnalysisMap,
   ]);
 
-  const matchedCountInView = useMemo(
-    () =>
-      filteredEvents.filter(
-        (ev) => (eventAnalysisMap.get(ev.id)?.impacts.length ?? 0) > 0
-      ).length,
-    [filteredEvents, eventAnalysisMap]
-  );
-
   function toggleExpand(id: string) {
     setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
   }
@@ -191,71 +178,45 @@ export function CalendarView({
     onlyPortfolio;
 
   return (
-    <div className="space-y-5">
-      {/* Date Range Tabs + Country Filter Bar + Portfolio Switch */}
-      <section className="bg-[#10151E] border border-[#1E2634] rounded-xl p-4 space-y-3.5">
-        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-          <div
-            role="tablist"
-            aria-label="เลือกช่วงเวลาปฏิทิน"
-            className="flex items-center gap-1 p-1 bg-[#090C11] border border-[#1E2634] rounded-lg overflow-x-auto"
-          >
-            {DATE_TABS.map((tab) => {
-              const active = dateTab === tab.key;
-              return (
-                <button
-                  key={tab.key}
-                  role="tab"
-                  aria-selected={active}
-                  type="button"
-                  onClick={() => setDateTab(tab.key)}
-                  className={`px-3.5 py-2 text-xs font-medium rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
-                    active
-                      ? 'bg-amber-500 text-slate-950 font-semibold'
-                      : 'text-slate-400 hover:text-slate-100 hover:bg-[#141B27]'
+    <div className="space-y-3">
+      {/* Single-Row Horizontal Scrollable Filter Controls */}
+      <section className="bg-[#10151E] border border-[#1E2634] rounded-2xl p-3.5 space-y-2.5">
+        {/* Row 1: Date Tabs (single row horizontal scroll) */}
+        <div
+          role="tablist"
+          aria-label="เลือกช่วงเวลาปฏิทิน"
+          className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap no-scrollbar"
+        >
+          {DATE_TABS.map((tab) => {
+            const active = dateTab === tab.key;
+            return (
+              <button
+                key={tab.key}
+                role="tab"
+                aria-selected={active}
+                type="button"
+                onClick={() => setDateTab(tab.key)}
+                className={`px-3 min-h-[38px] text-xs font-medium rounded-xl border transition-colors inline-flex items-center gap-1 shrink-0 cursor-pointer ${
+                  active
+                    ? 'bg-amber-500 text-slate-950 border-amber-500 font-semibold'
+                    : 'bg-[#090C11] border-[#1E2634] text-slate-400 hover:text-slate-100'
+                }`}
+              >
+                <span>{tab.label}</span>
+                <span
+                  className={`font-mono tabular-nums text-[11px] ${
+                    active ? 'text-slate-900/80' : 'text-slate-500'
                   }`}
                 >
-                  <span>{tab.label}</span>
-                  <span
-                    className={`font-mono tabular-nums text-[11px] ${
-                      active ? 'text-slate-900/80' : 'text-slate-500'
-                    }`}
-                  >
-                    ({tabCounts[tab.key]})
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          <button
-            type="button"
-            role="switch"
-            aria-checked={onlyPortfolio}
-            onClick={() => onToggleOnlyPortfolio(!onlyPortfolio)}
-            className={`inline-flex items-center justify-between sm:justify-start gap-3 px-3.5 py-2 rounded-lg border text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
-              onlyPortfolio
-                ? 'bg-amber-500/15 border-amber-500/50 text-amber-200'
-                : 'bg-[#090C11] border-[#253042] text-slate-300 hover:border-slate-600'
-            }`}
-          >
-            <span>ดูเฉพาะที่กระทบพอร์ตฉัน</span>
-            <span
-              className={`w-9 h-5 rounded-full p-0.5 transition-colors inline-flex items-center ${
-                onlyPortfolio ? 'bg-amber-500 justify-end' : 'bg-slate-700 justify-start'
-              }`}
-              aria-hidden="true"
-            >
-              <span className="w-4 h-4 rounded-full bg-white shadow-sm block" />
-            </span>
-          </button>
+                  ({tabCounts[tab.key]})
+                </span>
+              </button>
+            );
+          })}
         </div>
 
-        {/* Country Flag Filter Button Bar */}
-        <div className="flex items-center gap-1.5 overflow-x-auto pt-3 border-t border-[#1A2230] pb-0.5">
-          <span className="text-xs text-slate-400 mr-1 whitespace-nowrap shrink-0">
-            กรองประเทศ:
-          </span>
+        {/* Row 2: Country Filter Bar (single row horizontal scroll) */}
+        <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap no-scrollbar pt-2 border-t border-[#1A2230]">
           {COUNTRY_FILTER_OPTIONS.map((c) => {
             const active = countryFilter === c.code;
             return (
@@ -263,10 +224,10 @@ export function CalendarView({
                 key={c.code}
                 type="button"
                 onClick={() => setCountryFilter(c.code)}
-                className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                className={`px-2.5 min-h-[36px] rounded-xl border text-xs font-medium inline-flex items-center gap-1 shrink-0 transition-colors cursor-pointer ${
                   active
                     ? 'bg-amber-500/15 border-amber-500/50 text-amber-200'
-                    : 'bg-[#090C11] border-[#222C3D] text-slate-300 hover:border-slate-600 hover:text-slate-100'
+                    : 'bg-[#090C11] border-[#222C3D] text-slate-300'
                 }`}
               >
                 <span>{c.flag}</span>
@@ -276,12 +237,26 @@ export function CalendarView({
           })}
         </div>
 
-        {/* Secondary Filter Controls + Direction Legend */}
-        <div className="flex flex-wrap items-center gap-2.5 pt-3 border-t border-[#1A2230]">
-          <div className="inline-flex items-center gap-1.5 text-xs text-slate-400 mr-1">
-            <Filter className="w-3.5 h-3.5" />
-            <span>ตัวกรอง:</span>
-          </div>
+        {/* Row 3: Portfolio Switch + Impact/Category Filter (single row scroll) */}
+        <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap no-scrollbar pt-2 border-t border-[#1A2230]">
+          <button
+            type="button"
+            role="switch"
+            aria-checked={onlyPortfolio}
+            onClick={() => onToggleOnlyPortfolio(!onlyPortfolio)}
+            className={`px-3 min-h-[36px] rounded-xl border text-xs font-medium inline-flex items-center gap-2 shrink-0 cursor-pointer transition-colors ${
+              onlyPortfolio
+                ? 'bg-amber-500/15 border-amber-500/50 text-amber-200'
+                : 'bg-[#090C11] border-[#253042] text-slate-300'
+            }`}
+          >
+            <span>เฉพาะกระทบพอร์ต</span>
+            <span
+              className={`w-2 h-2 rounded-full ${
+                onlyPortfolio ? 'bg-amber-400' : 'bg-slate-600'
+              }`}
+            />
+          </button>
 
           <select
             value={impactFilter}
@@ -289,412 +264,190 @@ export function CalendarView({
               const v = e.target.value;
               setImpactFilter(v === 'ALL' ? 'ALL' : (Number(v) as ImpactLevel));
             }}
-            aria-label="กรองตามระดับความสำคัญ"
-            className="bg-[#090C11] border border-[#253042] rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500/70 cursor-pointer"
+            aria-label="ระดับความสำคัญ"
+            className="min-h-[36px] bg-[#090C11] border border-[#253042] rounded-xl px-2.5 text-xs text-slate-200 focus:outline-none shrink-0 cursor-pointer"
           >
-            <option value="ALL">ความสำคัญ: ทุกระดับ</option>
-            <option value="3">ระดับสูง (3 กระทิง)</option>
-            <option value="2">ระดับกลาง (2 กระทิง)</option>
-            <option value="1">ระดับต่ำ (1 กระทิง)</option>
+            <option value="ALL">ทุกระดับความสำคัญ</option>
+            <option value="3">สำคัญมาก (3)</option>
+            <option value="2">สำคัญกลาง (2)</option>
+            <option value="1">สำคัญน้อย (1)</option>
           </select>
 
           <select
             value={categoryFilter}
             onChange={(e) => setCategoryFilter(e.target.value as 'ALL' | EventCategory)}
-            aria-label="กรองตามประเภทเหตุการณ์"
-            className="bg-[#090C11] border border-[#253042] rounded-lg px-3 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-amber-500/70 cursor-pointer"
+            aria-label="ประเภทเหตุการณ์"
+            className="min-h-[36px] bg-[#090C11] border border-[#253042] rounded-xl px-2.5 text-xs text-slate-200 focus:outline-none shrink-0 cursor-pointer"
           >
-            <option value="ALL">ประเภท: ทุกเหตุการณ์</option>
-            <option value="economic">ตัวเลขเศรษฐกิจ (Macro)</option>
-            <option value="earnings">ประกาศงบ (Earnings)</option>
-            <option value="dividend">ปันผล (XD)</option>
+            <option value="ALL">ทุกประเภท</option>
+            <option value="economic">เศรษฐกิจ</option>
+            <option value="earnings">ประกาศงบ</option>
+            <option value="dividend">ปันผล XD</option>
           </select>
 
           {hasActiveFilters && (
             <button
               type="button"
               onClick={resetFilters}
-              className="inline-flex items-center gap-1 text-xs text-slate-400 hover:text-amber-300 px-2 py-1 transition-colors cursor-pointer"
+              className="min-h-[36px] px-2.5 text-xs text-slate-400 hover:text-amber-300 inline-flex items-center gap-1 shrink-0 cursor-pointer"
             >
               <RotateCcw className="w-3.5 h-3.5" />
-              <span>ล้างตัวกรอง</span>
+              <span>ล้าง</span>
             </button>
           )}
-
-          {/* Legend for Directional Chips */}
-          <div className="ml-auto flex flex-wrap items-center gap-3 text-[11px] text-slate-400">
-            <span className="inline-flex items-center gap-1 text-emerald-300">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              ขึ้น (Bullish)
-            </span>
-            <span className="inline-flex items-center gap-1 text-rose-300">
-              <span className="w-2 h-2 rounded-full bg-rose-400" />
-              ลง (Bearish)
-            </span>
-            <span className="inline-flex items-center gap-1 text-slate-300">
-              <span className="w-2 h-2 rounded-full bg-slate-400" />
-              คงที่ (Neutral)
-            </span>
-            <span className="hidden xl:inline text-slate-500">
-              · แสดง {filteredEvents.length} รายการ
-              {matchedCountInView > 0 ? ` (พอร์ต ${matchedCountInView})` : ''}
-            </span>
-          </div>
         </div>
       </section>
 
-      {/* Live Loading Banner */}
-      {isLoading && (
-        <LiveSearchingBanner message="กำลังค้นหาปฏิทินเศรษฐกิจจริงล่าสุดจาก Google Search Grounding..." />
-      )}
+      {isLoading && <LiveSearchingBanner message="กำลังอัปเดตปฏิทินเศรษฐกิจล่าสุด..." />}
 
-      {/* Main Calendar Table & Mobile Cards */}
-      <section className="bg-[#10151E] border border-[#1E2634] rounded-xl overflow-hidden">
-        {isLoading && events.length === 0 ? (
-          <CalendarRowsSkeleton rows={7} />
-        ) : !isLoading && error && events.length === 0 ? (
-          <div className="py-14 px-6 text-center space-y-3">
-            <AlertCircle className="w-6 h-6 text-rose-400 mx-auto" />
-            <p className="text-sm font-medium text-rose-200 max-w-lg mx-auto">{error}</p>
-            <button
-              type="button"
-              onClick={onRetrySync}
-              className="px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              <span>ลองค้นหาข้อมูลจริงอีกครั้ง</span>
-            </button>
-          </div>
-        ) : filteredEvents.length === 0 ? (
-          <div className="py-14 px-6 text-center space-y-3">
-            {onlyPortfolio && portfolio.length === 0 ? (
-              <>
-                <p className="text-sm text-slate-200 font-medium">
-                  พอร์ตโฟลิโอของคุณยังไม่มีสินทรัพย์
-                </p>
-                <p className="text-xs text-slate-400">
-                  เพิ่มสินทรัพย์จริงของคุณก่อน เพื่อให้ระบบคัดกรองและคาดการณ์ทิศทางสินทรัพย์แบบเรียลไทม์
-                </p>
+      {/* Single-Column Event Cards */}
+      {isLoading && events.length === 0 ? (
+        <div className="bg-[#10151E] border border-[#1E2634] rounded-2xl overflow-hidden">
+          <CalendarRowsSkeleton rows={5} />
+        </div>
+      ) : !isLoading && error && events.length === 0 ? (
+        <div className="bg-[#10151E] border border-[#1E2634] rounded-2xl p-6 text-center space-y-3">
+          <AlertCircle className="w-6 h-6 text-rose-400 mx-auto" />
+          <p className="text-xs text-rose-200">{error}</p>
+          <button
+            type="button"
+            onClick={onRetrySync}
+            className="min-h-[40px] px-4 rounded-xl text-xs font-semibold bg-amber-500 text-slate-950 inline-flex items-center gap-1.5 cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>ลองอัปเดตใหม่</span>
+          </button>
+        </div>
+      ) : filteredEvents.length === 0 ? (
+        <div className="bg-[#10151E] border border-[#1E2634] rounded-2xl p-6 text-center space-y-3">
+          {onlyPortfolio && portfolio.length === 0 ? (
+            <>
+              <p className="text-sm text-slate-200 font-semibold">พอร์ตของคุณยังว่างอยู่</p>
+              <button
+                type="button"
+                onClick={onGoToPortfolio}
+                className="min-h-[42px] px-4 rounded-xl bg-amber-500 text-slate-950 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>เพิ่มสินทรัพย์ในพอร์ต</span>
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-xs text-slate-400">
+                ไม่พบเหตุการณ์ตามตัวกรองที่เลือกในช่วงเวลานี้
+              </p>
+              {hasActiveFilters && (
                 <button
                   type="button"
-                  onClick={onGoToPortfolio}
-                  className="mt-2 px-4 py-2 text-xs font-semibold rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                  onClick={resetFilters}
+                  className="min-h-[38px] px-4 rounded-xl bg-[#161E2B] border border-[#253042] text-xs text-slate-200 cursor-pointer"
                 >
-                  <Plus className="w-4 h-4" />
-                  <span>+ เพิ่มสินทรัพย์ในพอร์ต</span>
+                  แสดงทั้งหมด
                 </button>
-              </>
-            ) : (
-              <>
-                <p className="text-sm text-slate-300 font-medium">
-                  ไม่พบเหตุการณ์ตามเงื่อนไขที่เลือกในช่วงเวลานี้
-                </p>
-                <p className="text-xs text-slate-500">
-                  ลองเปลี่ยนแท็บช่วงเวลาเป็น &quot;สัปดาห์นี้&quot; หรือ &quot;สัปดาห์หน้า&quot; หรือเลือกประเทศเป็น &quot;ทั้งหมด&quot;
-                </p>
-                {hasActiveFilters && (
+              )}
+            </>
+          )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3">
+          {filteredEvents.map((ev) => {
+            const analysis = eventAnalysisMap.get(ev.id);
+            const impacts = analysis?.impacts ?? [];
+            const directions = analysis?.directions ?? [];
+            const directCount = impacts.filter((i) => i.relation === 'direct').length;
+            const indirectCount = impacts.length - directCount;
+            const isMatched = impacts.length > 0;
+            const expanded = Boolean(expandedIds[ev.id]);
+            const isReleased = ev.actualOutcome !== 'pending' && ev.actual !== '—';
+
+            const actualColor =
+              ev.actualOutcome === 'better'
+                ? 'text-emerald-400'
+                : ev.actualOutcome === 'worse'
+                ? 'text-rose-400'
+                : 'text-slate-100';
+
+            return (
+              <article
+                key={ev.id}
+                className={`bg-[#10151E] border rounded-2xl p-4 space-y-2.5 ${
+                  directCount > 0
+                    ? 'border-amber-500/40'
+                    : indirectCount > 0
+                    ? 'border-sky-500/35'
+                    : 'border-[#1E2634]'
+                }`}
+              >
+                {/* Element 1: Flag + Date/Time + Impact */}
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-1.5 min-w-0 text-slate-300">
+                    <span className="shrink-0">{ev.flag}</span>
+                    <span className="font-mono tabular-nums font-semibold text-slate-100 shrink-0">
+                      {ev.time}
+                    </span>
+                    <span className="text-slate-500">·</span>
+                    <span className="text-slate-400 shrink-0">
+                      {formatThaiShortDate(ev.date)}
+                    </span>
+                    <span className="text-slate-500">·</span>
+                    <span className="truncate">{ev.countryNameTh}</span>
+                  </div>
+                  <ImpactRating level={ev.impact} showLabel={false} />
+                </div>
+
+                {/* Element 2: Event Title (<= 2 lines) & Concise Status */}
+                <div className="space-y-1">
+                  <h3 className="text-sm font-semibold text-slate-100 leading-snug line-clamp-2">
+                    {ev.title}
+                  </h3>
+                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                    <span>{EVENT_CATEGORY_LABELS[ev.category]}</span>
+                    <span>·</span>
+                    <span className={isReleased ? 'text-emerald-300' : 'text-amber-300'}>
+                      {isReleased ? `จริง ${ev.actual}` : `คาดการณ์ ${ev.forecast}`}
+                    </span>
+                    {isMatched && (
+                      <PortfolioMatchBadge
+                        directCount={directCount}
+                        indirectCount={indirectCount}
+                      />
+                    )}
+                  </div>
+                </div>
+
+                {/* Element 3: Clean Expand Toggle */}
+                <div className="flex items-center justify-between gap-2 pt-1 border-t border-[#1A2230]">
+                  <span className="text-[11px] font-mono text-slate-500">
+                    ครั้งก่อน {ev.previous}
+                  </span>
                   <button
                     type="button"
-                    onClick={resetFilters}
-                    className="mt-2 px-4 py-2 text-xs font-medium rounded-lg bg-[#161E2B] border border-[#283549] text-slate-200 hover:bg-[#1E293B] transition-colors cursor-pointer"
-                  >
-                    แสดงเหตุการณ์ทั้งหมด
-                  </button>
-                )}
-              </>
-            )}
-          </div>
-        ) : (
-          <>
-            {/* Desktop Table */}
-            <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-[#0D121A] border-b border-[#1E2634] text-[11px] font-medium text-slate-400">
-                    <th className="py-3 px-4 whitespace-nowrap">เวลา / วันที่</th>
-                    <th className="py-3 px-3 whitespace-nowrap">ประเทศ</th>
-                    <th className="py-3 px-3 whitespace-nowrap">ความสำคัญ</th>
-                    <th className="py-3 px-3">
-                      เหตุการณ์ &amp; คาดการณ์ทิศทางสินทรัพย์ (ขึ้น / ลง / คงที่)
-                    </th>
-                    <th className="py-3 px-3 text-right whitespace-nowrap">ค่าจริง</th>
-                    <th className="py-3 px-3 text-right whitespace-nowrap">คาดการณ์</th>
-                    <th className="py-3 px-4 text-right whitespace-nowrap">ครั้งก่อน</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#1A2230]">
-                  {filteredEvents.map((ev) => {
-                    const analysis = eventAnalysisMap.get(ev.id);
-                    const impacts = analysis?.impacts ?? [];
-                    const directions = analysis?.directions ?? [];
-                    const directCount = impacts.filter((i) => i.relation === 'direct').length;
-                    const indirectCount = impacts.length - directCount;
-                    const isMatched = impacts.length > 0;
-                    const expanded = Boolean(expandedIds[ev.id]);
-                    const isReleased = ev.actualOutcome !== 'pending' && ev.actual !== '—';
-
-                    const actualColor =
-                      ev.actualOutcome === 'better'
-                        ? 'text-emerald-400 font-semibold'
-                        : ev.actualOutcome === 'worse'
-                        ? 'text-rose-400 font-semibold'
-                        : ev.actualOutcome === 'inline'
-                        ? 'text-slate-100 font-semibold'
-                        : 'text-slate-500';
-
-                    return (
-                      <React.Fragment key={ev.id}>
-                        <tr
-                          onClick={() => toggleExpand(ev.id)}
-                          className={`transition-colors cursor-pointer ${
-                            directCount > 0
-                              ? 'bg-amber-500/[0.06] hover:bg-amber-500/[0.11]'
-                              : indirectCount > 0
-                              ? 'bg-sky-500/[0.04] hover:bg-sky-500/[0.08]'
-                              : 'hover:bg-[#151C28]'
-                          }`}
-                        >
-                          <td className="py-3.5 px-4 align-top whitespace-nowrap">
-                            <div className="flex items-start gap-2.5">
-                              <span
-                                className={`w-1 h-8 rounded-full mt-0.5 shrink-0 ${
-                                  directCount > 0
-                                    ? 'bg-amber-400'
-                                    : indirectCount > 0
-                                    ? 'bg-sky-400'
-                                    : 'bg-transparent'
-                                }`}
-                                aria-hidden="true"
-                              />
-                              <div>
-                                <div className="font-mono tabular-nums text-sm font-semibold text-slate-100">
-                                  {ev.time}
-                                </div>
-                                <div className="text-[11px] text-slate-400 mt-0.5">
-                                  {formatThaiShortDate(ev.date)}
-                                </div>
-                              </div>
-                            </div>
-                          </td>
-
-                          <td className="py-3.5 px-3 align-top whitespace-nowrap">
-                            <div className="inline-flex items-center gap-2">
-                              <span className="text-lg leading-none">{ev.flag}</span>
-                              <div>
-                                <div className="text-xs font-semibold text-slate-100">
-                                  {ev.countryNameTh}
-                                </div>
-                                <div className="font-mono text-[11px] text-slate-500">
-                                  {ev.currency}
-                                </div>
-                              </div>
-                            </div>
-                          </td>
-
-                          <td className="py-3.5 px-3 align-top whitespace-nowrap">
-                            <div className="pt-0.5">
-                              <ImpactRating level={ev.impact} />
-                            </div>
-                          </td>
-
-                          <td className="py-3.5 px-3 align-top min-w-[320px]">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-sm font-medium text-slate-100 leading-snug">
-                                {ev.title}
-                              </span>
-                              {isMatched && (
-                                <PortfolioMatchBadge
-                                  directCount={directCount}
-                                  indirectCount={indirectCount}
-                                />
-                              )}
-                              {ev.isLiveSynced && (
-                                <span className="text-[10px] font-medium text-sky-300 bg-sky-500/15 px-1.5 py-0.5 rounded">
-                                  ข้อมูลสด
-                                </span>
-                              )}
-                            </div>
-
-                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400 mt-1">
-                              <span
-                                className={
-                                  ev.category === 'earnings'
-                                    ? 'text-sky-300 font-medium'
-                                    : ev.category === 'dividend'
-                                    ? 'text-emerald-300 font-medium'
-                                    : 'text-slate-400'
-                                }
-                              >
-                                {EVENT_CATEGORY_LABELS[ev.category]}
-                              </span>
-                              <span aria-hidden="true">·</span>
-                              <span className={isReleased ? 'text-emerald-300/90' : 'text-amber-300/90'}>
-                                {isReleased ? 'ประกาศแล้ว (เทียบคาดการณ์)' : 'รอประกาศ (คาดการณ์แนวโน้ม)'}
-                              </span>
-                              <span aria-hidden="true">·</span>
-                              <span className="inline-flex items-center gap-0.5 text-slate-500">
-                                รายละเอียด
-                                {expanded ? (
-                                  <ChevronUp className="w-3 h-3" />
-                                ) : (
-                                  <ChevronDown className="w-3 h-3" />
-                                )}
-                              </span>
-                            </div>
-
-                            {/* Directional Asset Forecast Chips (🟢 ขึ้น / 🔴 ลง / ⚪ คงที่) */}
-                            <AssetDirectionForecastList
-                              forecasts={directions}
-                              isReleased={isReleased}
-                              onTickerClick={onAssetTagClick}
-                            />
-
-                            {/* Portfolio Direct/Indirect Correlation Matrix if matched */}
-                            {isMatched && (
-                              <PortfolioImpactMatrix
-                                impacts={impacts}
-                                compact={!expanded}
-                                onTickerClick={onAssetTagClick}
-                              />
-                            )}
-                          </td>
-
-                          <td className="py-3.5 px-3 align-top text-right whitespace-nowrap">
-                            <span className={`font-mono tabular-nums text-sm ${actualColor}`}>
-                              {ev.actual}
-                            </span>
-                          </td>
-
-                          <td className="py-3.5 px-3 align-top text-right whitespace-nowrap">
-                            <span className="font-mono tabular-nums text-sm text-slate-300">
-                              {ev.forecast}
-                            </span>
-                          </td>
-
-                          <td className="py-3.5 px-4 align-top text-right whitespace-nowrap">
-                            <span className="font-mono tabular-nums text-sm text-slate-400">
-                              {ev.previous}
-                            </span>
-                          </td>
-                        </tr>
-
-                        {expanded && (
-                          <tr className="bg-[#0C1118]">
-                            <td colSpan={7} className="px-6 py-3.5 border-t border-[#1A2230]/70 space-y-2">
-                              <p className="text-xs text-slate-300 leading-relaxed max-w-4xl">
-                                <span className="text-amber-400 font-medium mr-1.5">
-                                  ภาพรวมผลกระทบต่อตลาดโลก:
-                                </span>
-                                {ev.descriptionTh ||
-                                  'ติดตามความผันผวนของสินทรัพย์ที่เกี่ยวข้องในช่วงเวลาประกาศตัวเลข'}
-                              </p>
-                              {directions.length > 0 && (
-                                <div className="space-y-1 pt-1">
-                                  {directions.map((fc) => (
-                                    <div key={fc.symbol} className="text-xs text-slate-400 flex flex-wrap gap-x-2">
-                                      <strong className="font-mono text-slate-200">{fc.symbol}:</strong>
-                                      <span>{fc.reasonTh}</span>
-                                      {fc.scenarioNoteTh && (
-                                        <span className="text-amber-300/85">({fc.scenarioNoteTh})</span>
-                                      )}
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </td>
-                          </tr>
-                        )}
-                      </React.Fragment>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Mobile Card Rows */}
-            <div className="md:hidden divide-y divide-[#1A2230]">
-              {filteredEvents.map((ev) => {
-                const analysis = eventAnalysisMap.get(ev.id);
-                const impacts = analysis?.impacts ?? [];
-                const directions = analysis?.directions ?? [];
-                const directCount = impacts.filter((i) => i.relation === 'direct').length;
-                const indirectCount = impacts.length - directCount;
-                const isMatched = impacts.length > 0;
-                const expanded = Boolean(expandedIds[ev.id]);
-                const isReleased = ev.actualOutcome !== 'pending' && ev.actual !== '—';
-
-                const actualColor =
-                  ev.actualOutcome === 'better'
-                    ? 'text-emerald-400'
-                    : ev.actualOutcome === 'worse'
-                    ? 'text-rose-400'
-                    : 'text-slate-100';
-
-                return (
-                  <article
-                    key={ev.id}
                     onClick={() => toggleExpand(ev.id)}
-                    className={`p-4 space-y-2.5 transition-colors ${
-                      directCount > 0
-                        ? 'bg-amber-500/[0.06]'
-                        : indirectCount > 0
-                        ? 'bg-sky-500/[0.04]'
-                        : ''
-                    }`}
+                    className="min-h-[36px] px-2.5 text-xs font-medium text-amber-400 hover:text-amber-300 inline-flex items-center gap-1 cursor-pointer"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 text-xs">
-                        {isMatched && (
-                          <span
-                            className={`w-1 h-4 rounded-full shrink-0 ${
-                              directCount > 0 ? 'bg-amber-400' : 'bg-sky-400'
-                            }`}
-                            aria-hidden="true"
-                          />
-                        )}
-                        <span className="font-mono tabular-nums font-semibold text-slate-100">
-                          {ev.time}
-                        </span>
-                        <span className="text-slate-500">·</span>
-                        <span className="text-slate-400">
-                          {formatThaiShortDate(ev.date)}
-                        </span>
-                        <span className="text-slate-500">·</span>
-                        <span className="text-slate-200 font-medium">
-                          {ev.flag} {ev.countryNameTh}
-                        </span>
-                      </div>
-                      <ImpactRating level={ev.impact} showLabel={false} />
-                    </div>
+                    <span>{expanded ? 'ย่อ' : 'ดูเพิ่มเติม'}</span>
+                    {expanded ? (
+                      <ChevronUp className="w-4 h-4" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
 
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="text-sm font-medium text-slate-100 leading-snug">
-                          {ev.title}
-                        </h3>
-                        {isMatched && (
-                          <PortfolioMatchBadge
-                            directCount={directCount}
-                            indirectCount={indirectCount}
-                          />
-                        )}
-                      </div>
-                      <div className="text-[11px] text-slate-400 mt-0.5">
-                        {EVENT_CATEGORY_LABELS[ev.category]} ·{' '}
-                        {isReleased ? 'ประกาศแล้ว' : 'รอประกาศ'}
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-3 gap-2 py-2 px-3 rounded-lg bg-[#0B0F16] border border-[#1B2331] text-center">
+                {/* Progressive Disclosure Body */}
+                {expanded && (
+                  <div className="pt-2.5 border-t border-[#1B2331] space-y-3">
+                    <div className="grid grid-cols-3 gap-2 py-2 px-3 rounded-xl bg-[#090C11] border border-[#1B2331] text-center">
                       <div>
                         <div className="text-[10px] text-slate-500">ค่าจริง</div>
-                        <div className={`font-mono tabular-nums text-xs font-semibold mt-0.5 ${actualColor}`}>
+                        <div className={`font-mono tabular-nums text-xs font-bold mt-0.5 ${actualColor}`}>
                           {ev.actual}
                         </div>
                       </div>
                       <div className="border-x border-[#1B2331]">
                         <div className="text-[10px] text-slate-500">คาดการณ์</div>
-                        <div className="font-mono tabular-nums text-xs text-slate-300 mt-0.5">
+                        <div className="font-mono tabular-nums text-xs text-slate-200 mt-0.5">
                           {ev.forecast}
                         </div>
                       </div>
@@ -706,54 +459,32 @@ export function CalendarView({
                       </div>
                     </div>
 
-                    <AssetDirectionForecastList
-                      forecasts={directions}
-                      isReleased={isReleased}
-                      onTickerClick={onAssetTagClick}
-                    />
-
-                    {isMatched && (
-                      <PortfolioImpactMatrix
-                        impacts={impacts}
-                        compact={!expanded}
+                    {directions.length > 0 && (
+                      <AssetDirectionForecastList
+                        forecasts={directions}
+                        isReleased={isReleased}
                         onTickerClick={onAssetTagClick}
                       />
                     )}
 
-                    {expanded && ev.descriptionTh && (
-                      <p className="text-xs text-slate-300 leading-relaxed pt-2 border-t border-[#1E2634]">
+                    {isMatched && (
+                      <PortfolioImpactMatrix
+                        impacts={impacts}
+                        onTickerClick={onAssetTagClick}
+                      />
+                    )}
+
+                    {ev.descriptionTh && (
+                      <p className="text-xs text-slate-300 leading-relaxed">
                         {ev.descriptionTh}
                       </p>
                     )}
-                  </article>
-                );
-              })}
-            </div>
-          </>
-        )}
-      </section>
-
-      {/* Grounding Sources */}
-      {sources.length > 0 && (
-        <section className="bg-[#10151E] border border-[#1E2634] rounded-xl p-4">
-          <h3 className="text-xs font-semibold text-slate-300 mb-2">
-            แหล่งอ้างอิงปฏิทินเศรษฐกิจจริง (Google Search Grounding)
-          </h3>
-          <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-            {sources.map((src) => (
-              <a
-                key={src.uri}
-                href={src.uri}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-xs text-sky-400 hover:text-sky-300 hover:underline max-w-xs truncate"
-              >
-                <span className="truncate">{src.title}</span>
-                <ExternalLink className="w-3 h-3 shrink-0" />
-              </a>
-            ))}
-          </div>
-        </section>
+                  </div>
+                )}
+              </article>
+            );
+          })}
+        </div>
       )}
     </div>
   );

@@ -12,12 +12,12 @@ import {
 } from '../types';
 
 const BATCHED_CACHE_PREFIX = 'investcal_batched_live_v5_';
-const CHART_AI_CACHE_PREFIX = 'investcal_chart_ai_v1_';
+const CHART_AI_CACHE_PREFIX = 'investcal_trend_fib_ai_v2_';
 
 /** 6-hour cache TTL to stay 100% within Gemini Free Tier quotas */
 export const BATCHED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
-/** 4-hour cache TTL for On-Demand AI Technical & Elliott Wave Analysis */
+/** 4-hour cache TTL for On-Demand Concise AI Trend & Fibonacci Buy/Sell Plan */
 export const CHART_AI_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
 
 export interface CachedBatchedBundle {

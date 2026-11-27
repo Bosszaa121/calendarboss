@@ -19,7 +19,6 @@ import type {
   SocialPlatform,
   SocialSentiment,
   SyncSource,
-  WavePoint,
 } from '../types.ts';
 import type { PublicRssHeadline } from './publicMarketFeeds.ts';
 
@@ -1272,7 +1271,7 @@ export function buildPublicOnlyFallbackBatchedResponse(
 }
 
 // ============================================================================
-// 3. On-Demand AI Technical & Elliott Wave Analysis (NO googleSearch tool)
+// 3. On-Demand AI Concise Buy/Sell Plan from Trend, S/R & Fibonacci (NO googleSearch)
 // ============================================================================
 
 export interface ChartTechnicalPromptInput {
@@ -1282,58 +1281,52 @@ export interface ChartTechnicalPromptInput {
   currency: string;
   timeframe: ChartTimeframe;
   latestPrice: number;
+  ema20: number | null;
+  ema50: number | null;
+  trend: ChartTrendDirection;
   support1: number;
   support2: number;
   resistance1: number;
   resistance2: number;
-  wavePattern: string;
-  waveDirection: string;
-  wavePoints: WavePoint[];
+  fib382: number;
+  fib500: number;
+  fib618: number;
+  fib1272: number;
+  fib1618: number;
   averageCost?: number;
   quantity?: number;
 }
 
 export function buildChartTechnicalPrompt(input: ChartTechnicalPromptInput): string {
-  const waveCoordsText =
-    input.wavePoints.length > 0
-      ? input.wavePoints
-          .map(
-            (w) =>
-              `Wave ${w.label} (${w.type === 'high' ? 'Swing High' : 'Swing Low'}): ${w.price} ${input.currency}`
-          )
-          .join(' -> ')
-      : 'ยังไม่มีจุดกลับตัวชัดเจน';
-
   const costText =
     typeof input.averageCost === 'number' && input.averageCost > 0
-      ? `ราคาทุนเฉลี่ยของผู้ใช้ (Breakeven): ${input.averageCost} ${input.currency} (${
-          ((input.latestPrice - input.averageCost) / input.averageCost * 100).toFixed(2)
-        }% เทียบราคาปัจจุบัน)${input.quantity ? ` · จำนวน ${input.quantity} หน่วย` : ''}`
-      : 'ผู้ใช้ยังไม่ได้กรอกราคาทุนเฉลี่ย (ให้แนะนำจุดเข้าสะสมสำหรับผู้เริ่มต้นถือหรือรอจังหวะ)';
+      ? `ต้นทุนเฉลี่ยของผู้ใช้: ${input.averageCost} ${input.currency} (${(
+          ((input.latestPrice - input.averageCost) / input.averageCost) *
+          100
+        ).toFixed(2)}% เทียบราคาปัจจุบัน)${input.quantity ? ` · จำนวน ${input.quantity} หน่วย` : ''}`
+      : 'ผู้ใช้ยังไม่ได้กรอกต้นทุนเฉลี่ย (แนะนำจุดรอรับและเป้าหมายทำกำไรสำหรับผู้เริ่มวางแผน)';
 
-  return `คุณเป็นนักวิเคราะห์เทคนิคและผู้เชี่ยวชาญ Elliott Wave ระดับสถาบัน
-วิเคราะห์ข้อมูลโครงสร้างราคาจริงต่อไปนี้ใน 1 คำขอเดียว (ห้ามแต่งตัวเลขราคาอื่นนอกเหนือจากฐานราคาจริงที่ให้):
+  return `คุณเป็นนักวางแผนการลงทุนสายเทคนิคที่สรุปสั้น กระชับ อ่านง่ายบนมือถือ
+วิเคราะห์ตัวเลขจริงต่อไปนี้ (ห้ามแต่งตัวเลขราคาอื่นนอกเหนือจากฐานราคาจริงที่ให้):
 
-- สินทรัพย์: ${input.symbol} (${input.name} · ${input.category})
-- Timeframe: ${input.timeframe}
+- สินทรัพย์: ${input.symbol} (${input.name} · ${input.category}) | กรอบเวลา ${input.timeframe}
 - ราคาล่าสุด: ${input.latestPrice} ${input.currency}
-- แนวต้านสำคัญ: R1 = ${input.resistance1} ${input.currency}, R2 = ${input.resistance2} ${input.currency}
-- แนวรับสำคัญ: S1 = ${input.support1} ${input.currency}, S2 = ${input.support2} ${input.currency}
-- โครงสร้างคลื่น ZigZag เบื้องต้น (${input.wavePattern} / ${input.waveDirection}): ${waveCoordsText}
+- เทรนจาก EMA: ${input.trend} (EMA20=${input.ema20 ?? 'N/A'}, EMA50=${input.ema50 ?? 'N/A'})
+- แนวรับ: S1=${input.support1}, S2=${input.support2} | แนวต้าน: R1=${input.resistance1}, R2=${input.resistance2}
+- Fibonacci ย่อตัว (Retracement): 38.2%=${input.fib382}, 50.0%=${input.fib500}, 61.8%=${input.fib618}
+- Fibonacci เป้าถัดไป (Extension): 127.2%=${input.fib1272}, 161.8%=${input.fib1618}
 - ${costText}
 
-ให้ตอบเป็น JSON เท่านั้นตามโครงสร้างนี้:
+ให้ตอบเป็น JSON เท่านั้น โดยเน้นแผนเข้าซื้อ-ขายภาษาไทยสั้นกระชับ ไม่เกิน 3 บรรทัด:
 {
   "trend": "<Uptrend | Downtrend | Sideway>",
-  "trendTh": "<สรุปแนวโน้มหลักภาษาไทยสั้นกระชับ เช่น ขาขึ้นแข็งแกร่ง / พักฐานในกรอบ / ขาลงระยะสั้น>",
-  "waveStatusTh": "<อธิบายสถานะคลื่น Elliott Wave ปัจจุบัน 1-2 ประโยคภาษาไทย เช่น กำลังอยู่ในคลื่น 3 ขาขึ้น หรือ พักฐานคลื่น B>",
-  "invalidationLevel": "<ระดับราคาจุดยกเลิกการนับคลื่นพร้อมสกุลเงินและเหตุผลสั้นๆ>",
-  "nextWaveTarget": "<เป้าหมายราคาคลื่นถัดไปพร้อมสกุลเงิน>",
-  "buyDcaZone": "<โซนราคาเข้าซื้อสะสม / DCA ที่ได้เปรียบ>",
-  "takeProfitZone": "<โซนราคาทำกำไร (Take Profit)>",
-  "stopLossLevel": "<จุดตัดขาดทุน (Stop Loss) ที่ชัดเจน>",
-  "breakevenAdviceTh": "<คำแนะนำกลยุทธ์บริหารพอร์ตเทียบกับจุดคุ้มทุนของผู้ใช้ 1-2 ประโยคภาษาไทย>",
-  "summaryTh": "<บทสรุปภาพรวมเทคนิคและข้อควรระวัง 2 ประโยคภาษาไทย>"
+  "trendTh": "<เทรนขาขึ้น | เทรนขาลง | ไซด์เวย์>",
+  "shortPlanLinesTh": [
+    "<บรรทัด 1: โซนรอซื้อ/DCA ที่ได้เปรียบอ้างอิง S1/Fib พร้อมตัวเลขราคาจริง>",
+    "<บรรทัด 2: เป้าทยอยขายทำกำไรอ้างอิง R1/Fib Extension พร้อมตัวเลขราคาจริง>",
+    "<บรรทัด 3: จุดคุมความเสี่ยง/Stop Loss หรือคำแนะนำเทียบจุดคุ้มทุนสั้นๆ>"
+  ],
+  "summaryTh": "<สรุปสั้น 1 ประโยคไม่เกิน 140 ตัวอักษร>"
 }`;
 }
 
@@ -1350,7 +1343,23 @@ export function parseChartTechnicalResponse(
       : 'Sideway';
 
   const str = (val: unknown, fallback: string) =>
-    typeof val === 'string' && val.trim() ? val.trim().slice(0, 320) : fallback;
+    typeof val === 'string' && val.trim() ? val.trim().slice(0, 220) : fallback;
+
+  const rawLines = Array.isArray(parsed.shortPlanLinesTh)
+    ? parsed.shortPlanLinesTh
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        .map((line) => line.trim().slice(0, 180))
+        .slice(0, 3)
+    : [];
+
+  const shortPlanLinesTh =
+    rawLines.length > 0
+      ? rawLines
+      : [
+          'โซนเข้าสะสม: ทยอยรับใกล้แนวรับ S1 หรือโซนย่อตัว Fib 38.2% – 50.0%',
+          'เป้าทำกำไร: แบ่งขายบางส่วนเมื่อทดสอบแนวต้าน R1 และเป้า Fib 127.2%',
+          'คุมความเสี่ยง: ทบทวนสถานะหากราคาปิดหลุดแนวรับ S2 / โซน Fib 61.8%',
+        ];
 
   return {
     symbol: symbol.trim().toUpperCase(),
@@ -1358,21 +1367,12 @@ export function parseChartTechnicalResponse(
     trend,
     trendTh: str(
       parsed.trendTh,
-      trend === 'Uptrend' ? 'แนวโน้มขาขึ้น' : trend === 'Downtrend' ? 'แนวโน้มขาลง' : 'แกว่งตัวออกข้าง'
+      trend === 'Uptrend' ? 'เทรนขาขึ้น' : trend === 'Downtrend' ? 'เทรนขาลง' : 'ไซด์เวย์'
     ),
-    waveStatusTh: str(parsed.waveStatusTh, 'กำลังสร้างฐานโครงสร้างคลื่นเบื้องต้นตามแนวรับ-แนวต้านหลัก'),
-    invalidationLevel: str(parsed.invalidationLevel, 'หลุดต่ำกว่าแนวรับ S2'),
-    nextWaveTarget: str(parsed.nextWaveTarget, 'ทดสอบแนวต้าน R1 – R2'),
-    buyDcaZone: str(parsed.buyDcaZone, 'ทยอยสะสมใกล้แนวรับ S1 – S2'),
-    takeProfitZone: str(parsed.takeProfitZone, 'แบ่งขายทำกำไรบริเวณแนวต้าน R1 – R2'),
-    stopLossLevel: str(parsed.stopLossLevel, 'ต่ำกว่าแนวรับ S2 อย่างมีนัยสำคัญ'),
-    breakevenAdviceTh: str(
-      parsed.breakevenAdviceTh,
-      'บริหารขนาดไม้ตามโซนแนวรับ-แนวต้านและรักษาวินัยจุดตัดขาดทุน'
-    ),
+    shortPlanLinesTh,
     summaryTh: str(
       parsed.summaryTh,
-      'ใช้โครงสร้างคลื่นและแนวรับ-แนวต้านเป็นกรอบวางแผนซื้อขายควบคู่กับการติดตามข่าวเศรษฐกิจ'
+      shortPlanLinesTh[0] || 'วางแผนเข้าซื้อ-ขายตามกรอบแนวรับ แนวต้าน และระดับ Fibonacci'
     ),
     analyzedAt: new Date().toISOString(),
     fromCache: false,

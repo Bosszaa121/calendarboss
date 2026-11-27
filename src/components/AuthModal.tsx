@@ -1,54 +1,63 @@
 import React, { useState } from 'react';
 import {
-  AlertCircle,
   CheckCircle2,
   Download,
-  KeyRound,
   LogIn,
   LogOut,
+  ShieldCheck,
   Trash2,
   Upload,
-  User as UserIcon,
   UserPlus,
   Users,
   X,
 } from 'lucide-react';
-import { LocalUserAccount } from '../types';
+import { LocalUserAccount, QuotaSnapshot } from '../types';
 import {
   authenticateLocalAccount,
   deleteLocalAccount,
-  getAccountPortfolioCount,
   GUEST_ACCOUNT_ID,
+  loadLocalAccounts,
   registerLocalAccount,
   saveActiveAccountId,
 } from '../utils/localAuth';
+import { SidebarQuotaCard } from './ApiQuotaGauge';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface AuthModalProps {
   open: boolean;
-  onClose: () => void;
   accounts: LocalUserAccount[];
   activeAccountId: string;
-  onAuthChange: (nextAccounts: LocalUserAccount[], nextActiveId: string, message?: string) => void;
+  portfolioCount: number;
+  quota: QuotaSnapshot;
   onExportJson: () => void;
   onImportJsonFile: (file: File) => void;
+  onClose: () => void;
+  onAuthChange: (
+    accounts: LocalUserAccount[],
+    activeAccountId: string,
+    noticeMessage?: string
+  ) => void;
 }
+
+type ModalSection = 'settings' | 'login' | 'register';
 
 export function AuthModal({
   open,
-  onClose,
   accounts,
   activeAccountId,
-  onAuthChange,
+  portfolioCount,
+  quota,
   onExportJson,
   onImportJsonFile,
+  onClose,
+  onAuthChange,
 }: AuthModalProps) {
-  const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
+  const [mode, setMode] = useState<ModalSection>('settings');
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [infoMsg, setInfoMsg] = useState<string | null>(null);
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   if (!open) return null;
 
@@ -56,374 +65,359 @@ export function AuthModal({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setBusy(true);
-    setErrorMsg(null);
-    setInfoMsg(null);
+    setError(null);
+    setSubmitting(true);
     try {
-      if (authTab === 'login') {
-        const res = await authenticateLocalAccount({ username, password });
-        if (!res.ok) {
-          setErrorMsg(res.error);
-          return;
-        }
-        setUsername('');
-        setPassword('');
-        onAuthChange(
-          accounts,
-          res.account.id,
-          `เข้าสู่ระบบบัญชี @${res.account.username} เรียบร้อยแล้ว`
-        );
-        onClose();
-      } else {
-        const res = await registerLocalAccount({
+      if (mode === 'register') {
+        const result = await registerLocalAccount({
           username,
-          password,
           displayName,
+          password,
         });
-        if (!res.ok) {
-          setErrorMsg(res.error);
+        if (!result.ok) {
+          setError(result.error);
           return;
         }
+        onAuthChange(
+          result.accounts,
+          result.account.id,
+          `สมัครสมาชิก "${result.account.displayName}" สำเร็จแล้ว (พอร์ตส่วนตัวแยกเฉพาะบัญชีนี้)`
+        );
+        setUsername('');
+        setDisplayName('');
+        setPassword('');
+        setMode('settings');
+      } else if (mode === 'login') {
+        const result = await authenticateLocalAccount({ username, password });
+        if (!result.ok) {
+          setError(result.error);
+          return;
+        }
+        onAuthChange(
+          loadLocalAccounts(),
+          result.account.id,
+          `เข้าสู่ระบบบัญชี "${result.account.displayName}" เรียบร้อยแล้ว`
+        );
         setUsername('');
         setPassword('');
-        setDisplayName('');
-        onAuthChange(
-          res.accounts,
-          res.account.id,
-          `สมัครสมาชิก @${res.account.username} สำเร็จ — พอร์ตเริ่มต้นว่าง 0 รายการพร้อมใช้งาน`
-        );
-        onClose();
+        setMode('settings');
       }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'ไม่สามารถดำเนินการได้');
     } finally {
-      setBusy(false);
+      setSubmitting(false);
     }
   }
 
-  function handleSwitchAccount(targetId: string) {
-    saveActiveAccountId(targetId);
-    const target = accounts.find((a) => a.id === targetId);
-    const label = target ? `@${target.username}` : 'โหมดผู้เยี่ยมชม (Guest)';
-    onAuthChange(accounts, targetId, `สลับไปยังบัญชี ${label} แล้ว`);
-    onClose();
+  function handleSwitchAccount(id: string) {
+    saveActiveAccountId(id);
+    const target = accounts.find((a) => a.id === id);
+    onAuthChange(
+      accounts,
+      id,
+      target ? `สลับไปยังบัญชี "${target.displayName}" แล้ว` : 'สลับไปยังโหมดผู้เยี่ยมชมแล้ว'
+    );
   }
 
   function handleLogoutToGuest() {
     saveActiveAccountId(GUEST_ACCOUNT_ID);
-    onAuthChange(accounts, GUEST_ACCOUNT_ID, 'ออกจากระบบแล้ว — กลับมาใช้งานโหมดผู้เยี่ยมชม');
-    onClose();
+    onAuthChange(accounts, GUEST_ACCOUNT_ID, 'ออกจากระบบแล้ว (กลับมาใช้โหมดผู้เยี่ยมชม)');
   }
 
-  function handleDeleteAccount(accountId: string, uname: string) {
-    const nextAccounts = deleteLocalAccount(accountId);
-    const nextActiveId = activeAccountId === accountId ? GUEST_ACCOUNT_ID : activeAccountId;
-    onAuthChange(nextAccounts, nextActiveId, `ลบบัญชี @${uname} ออกจากเบราว์เซอร์แล้ว`);
-    setInfoMsg(`ลบบัญชี @${uname} เรียบร้อยแล้ว`);
+  function handleDeleteAccount(id: string) {
+    const target = accounts.find((a) => a.id === id);
+    const nextAccounts = deleteLocalAccount(id);
+    const nextActiveId = activeAccountId === id ? GUEST_ACCOUNT_ID : activeAccountId;
+    onAuthChange(
+      nextAccounts,
+      nextActiveId,
+      target ? `ลบบัญชี "${target.displayName}" ออกจากเครื่องนี้แล้ว` : 'ลบบัญชีเรียบร้อยแล้ว'
+    );
   }
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-sm sm:p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="จัดการบัญชีผู้ใช้งาน InvestCal"
+      aria-labelledby="auth-modal-title"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg bg-[#10151E] border border-[#253042] rounded-xl shadow-2xl overflow-hidden max-h-[90vh] flex flex-col"
+        className="w-full max-w-xl bg-[#0D121A] border-t sm:border border-[#253042] rounded-t-2xl sm:rounded-2xl shadow-2xl max-h-[90vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Drag handle on mobile */}
+        <div className="pt-2.5 pb-1 flex justify-center sm:hidden shrink-0">
+          <div className="w-10 h-1 rounded-full bg-slate-700" aria-hidden="true" />
+        </div>
+
         {/* Header */}
-        <div className="px-5 py-4 border-b border-[#1E2634] flex items-center justify-between gap-3">
-          <div>
-            <h2 className="text-base font-semibold text-slate-100">
-              {activeAccount
-                ? `โปรไฟล์ผู้ใช้: ${activeAccount.displayName}`
-                : 'เข้าสู่ระบบ / สมัครสมาชิก InvestCal'}
-            </h2>
-            <p className="text-xs text-slate-400 mt-0.5">
-              บันทึกข้อมูลพอร์ตแยกตามบัญชีในเบราว์เซอร์ (Local Multi-Profile) พร้อม Export / Import JSON
-            </p>
+        <div className="px-4 py-3 border-b border-[#1E2634] flex items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-5 h-5 text-amber-400" />
+            </div>
+            <div className="min-w-0">
+              <h2 id="auth-modal-title" className="text-sm font-bold text-slate-100 truncate">
+                บัญชี &amp; ตั้งค่าระบบ
+              </h2>
+              <p className="text-[11px] text-slate-400 truncate">
+                {activeAccount
+                  ? `${activeAccount.displayName} (@${activeAccount.username})`
+                  : 'โหมดผู้เยี่ยมชม (Guest)'}{' '}
+                · {portfolioCount} สินทรัพย์
+              </p>
+            </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-100 hover:bg-[#1A2332] transition-colors cursor-pointer"
+            className="w-10 h-10 rounded-xl bg-[#141C28] border border-[#253042] text-slate-300 hover:text-white flex items-center justify-center shrink-0 cursor-pointer"
             aria-label="ปิดหน้าต่าง"
           >
-            <X className="w-4 h-4" />
+            <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Scrollable Body */}
-        <div className="p-5 space-y-5 overflow-y-auto">
-          {errorMsg && (
-            <div className="rounded-lg px-3.5 py-2.5 text-xs bg-rose-500/10 border border-rose-500/35 text-rose-200 flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-              <span className="leading-relaxed">{errorMsg}</span>
-            </div>
-          )}
+        {/* Section Switcher */}
+        <div className="px-4 pt-3 pb-2 shrink-0">
+          <div className="grid grid-cols-3 gap-1 p-1 bg-[#090C11] border border-[#1E2634] rounded-xl">
+            <button
+              type="button"
+              onClick={() => {
+                setMode('settings');
+                setError(null);
+              }}
+              className={`min-h-[38px] text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
+                mode === 'settings'
+                  ? 'bg-amber-500 text-slate-950'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              ตั้งค่า &amp; โควตา
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMode('login');
+                setError(null);
+              }}
+              className={`min-h-[38px] text-xs font-semibold rounded-lg transition-colors cursor-pointer inline-flex items-center justify-center gap-1 ${
+                mode === 'login'
+                  ? 'bg-amber-500 text-slate-950'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <LogIn className="w-3.5 h-3.5" />
+              <span>เข้าสู่ระบบ</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setMode('register');
+                setError(null);
+              }}
+              className={`min-h-[38px] text-xs font-semibold rounded-lg transition-colors cursor-pointer inline-flex items-center justify-center gap-1 ${
+                mode === 'register'
+                  ? 'bg-amber-500 text-slate-950'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>สมัครใหม่</span>
+            </button>
+          </div>
+        </div>
 
-          {infoMsg && (
-            <div className="rounded-lg px-3.5 py-2.5 text-xs bg-emerald-500/10 border border-emerald-500/35 text-emerald-200 flex items-start gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-              <span className="leading-relaxed">{infoMsg}</span>
-            </div>
-          )}
-
-          {/* Active Account Status Card */}
-          {activeAccount && (
-            <div className="p-4 rounded-xl bg-[#0B0F16] border border-[#1E2634] flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="w-10 h-10 rounded-full bg-amber-500/15 border border-amber-500/35 flex items-center justify-center text-amber-300 font-bold text-sm shrink-0">
-                  {activeAccount.displayName.slice(0, 2).toUpperCase()}
+        {/* Scrollable Content */}
+        <div className="p-4 pt-2 space-y-4 overflow-y-auto flex-1">
+          {mode === 'settings' ? (
+            <>
+              {/* 1. Full AI Quota Gauge */}
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-slate-300">
+                  หลอดแสดงโควตา AI (Free Tier Protection)
                 </div>
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-slate-100 truncate">
-                    {activeAccount.displayName}
-                  </div>
-                  <div className="text-xs text-slate-400 font-mono truncate">
-                    @{activeAccount.username} · {getAccountPortfolioCount(activeAccount.id)} สินทรัพย์
-                  </div>
+                <SidebarQuotaCard quota={quota} />
+              </div>
+
+              {/* 2. PWA Install & JSON Backup Utilities */}
+              <div className="bg-[#10151E] border border-[#1E2634] rounded-xl p-3.5 space-y-3">
+                <div className="text-xs font-semibold text-slate-300">
+                  ติดตั้งแอป &amp; สำรองพอร์ต (JSON)
+                </div>
+
+                <PWAInstallButton />
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={onExportJson}
+                    disabled={portfolioCount === 0}
+                    className="min-h-[44px] px-3 py-2 rounded-xl bg-[#090C11] border border-[#253042] hover:border-amber-500/50 disabled:opacity-45 disabled:cursor-not-allowed text-xs font-medium text-slate-200 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Download className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>Export JSON</span>
+                  </button>
+
+                  <label className="min-h-[44px] px-3 py-2 rounded-xl bg-[#090C11] border border-[#253042] hover:border-sky-500/50 text-xs font-medium text-slate-200 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer">
+                    <Upload className="w-4 h-4 text-sky-400 shrink-0" />
+                    <span>Import JSON</span>
+                    <input
+                      type="file"
+                      accept="application/json,.json"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          onImportJsonFile(file);
+                          e.target.value = '';
+                        }
+                      }}
+                    />
+                  </label>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={handleLogoutToGuest}
-                className="px-3 py-1.5 rounded-lg bg-[#161E2B] border border-[#283549] text-rose-300 hover:bg-rose-500/10 hover:border-rose-500/35 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>ออกจากระบบ</span>
-              </button>
-            </div>
-          )}
 
-          {/* Login / Register Tabs & Form */}
-          <div className="space-y-3.5">
-            <div className="grid grid-cols-2 gap-1 p-1 bg-[#090C11] border border-[#1E2634] rounded-lg">
-              <button
-                type="button"
-                onClick={() => {
-                  setAuthTab('login');
-                  setErrorMsg(null);
-                }}
-                className={`py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                  authTab === 'login'
-                    ? 'bg-[#1C2536] text-amber-300'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                เข้าสู่ระบบ
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setAuthTab('register');
-                  setErrorMsg(null);
-                }}
-                className={`py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                  authTab === 'register'
-                    ? 'bg-[#1C2536] text-amber-300'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                สมัครสมาชิกใหม่
-              </button>
-            </div>
+              {/* 3. Active Account & Local Account Switcher */}
+              <div className="bg-[#10151E] border border-[#1E2634] rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-300 inline-flex items-center gap-1.5">
+                    <Users className="w-4 h-4 text-amber-400" />
+                    <span>บัญชีในเครื่องนี้ ({accounts.length})</span>
+                  </span>
+                  {activeAccount && (
+                    <button
+                      type="button"
+                      onClick={handleLogoutToGuest}
+                      className="text-xs text-slate-400 hover:text-rose-300 inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>ออกเป็น Guest</span>
+                    </button>
+                  )}
+                </div>
 
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleSwitchAccount(GUEST_ACCOUNT_ID)}
+                    className={`w-full min-h-[44px] px-3 py-2 rounded-xl border text-left flex items-center justify-between text-xs cursor-pointer transition-colors ${
+                      activeAccountId === GUEST_ACCOUNT_ID
+                        ? 'bg-amber-500/12 border-amber-500/40 text-amber-200'
+                        : 'bg-[#090C11] border-[#1E2634] text-slate-300 hover:border-[#2F3C52]'
+                    }`}
+                  >
+                    <span>ผู้เยี่ยมชม (Guest)</span>
+                    {activeAccountId === GUEST_ACCOUNT_ID && (
+                      <CheckCircle2 className="w-4 h-4 text-amber-400 shrink-0" />
+                    )}
+                  </button>
+
+                  {accounts.map((acct) => {
+                    const isActive = acct.id === activeAccountId;
+                    return (
+                      <div
+                        key={acct.id}
+                        className={`min-h-[44px] px-3 py-2 rounded-xl border flex items-center justify-between gap-2 text-xs ${
+                          isActive
+                            ? 'bg-amber-500/12 border-amber-500/40 text-amber-200'
+                            : 'bg-[#090C11] border-[#1E2634] text-slate-300'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleSwitchAccount(acct.id)}
+                          className="flex-1 text-left min-w-0 cursor-pointer"
+                        >
+                          <div className="font-semibold truncate">{acct.displayName}</div>
+                          <div className="text-[11px] text-slate-400 font-mono">
+                            @{acct.username}
+                          </div>
+                        </button>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {isActive && <CheckCircle2 className="w-4 h-4 text-amber-400" />}
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteAccount(acct.id)}
+                            className="p-1.5 text-slate-500 hover:text-rose-400 cursor-pointer"
+                            aria-label={`ลบบัญชี ${acct.displayName}`}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          ) : (
             <form onSubmit={handleSubmit} className="space-y-3">
-              {authTab === 'register' && (
+              <div>
+                <label className="block text-xs text-slate-300 mb-1.5">
+                  ชื่อผู้ใช้ (Username)
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="เช่น somchai_inv"
+                  className="w-full min-h-[44px] bg-[#090C11] border border-[#253042] rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/70"
+                />
+              </div>
+
+              {mode === 'register' && (
                 <div>
-                  <label className="block text-xs text-slate-300 mb-1">
-                    ชื่อที่แสดง (Display Name)
+                  <label className="block text-xs text-slate-300 mb-1.5">
+                    ชื่อที่แสดงในพอร์ต
                   </label>
                   <input
                     type="text"
                     value={displayName}
                     onChange={(e) => setDisplayName(e.target.value)}
-                    placeholder="เช่น ต้น / พอร์ตออมหุ้น"
-                    className="w-full bg-[#090C11] border border-[#253042] rounded-lg px-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/70"
+                    placeholder="เช่น พอร์ตระยะยาว 2026"
+                    className="w-full min-h-[44px] bg-[#090C11] border border-[#253042] rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/70"
                   />
                 </div>
               )}
 
               <div>
-                <label className="block text-xs text-slate-300 mb-1">
-                  ชื่อผู้ใช้ (Username)
-                </label>
-                <div className="relative">
-                  <UserIcon className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="text"
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    placeholder="เช่น somchai_inv (ภาษาอังกฤษ/ตัวเลข)"
-                    required
-                    minLength={3}
-                    className="w-full bg-[#090C11] border border-[#253042] rounded-lg pl-9 pr-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/70"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs text-slate-300 mb-1">
+                <label className="block text-xs text-slate-300 mb-1.5">
                   รหัสผ่าน (อย่างน้อย 4 ตัวอักษร)
                 </label>
-                <div className="relative">
-                  <KeyRound className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="••••••••"
-                    required
-                    minLength={4}
-                    className="w-full bg-[#090C11] border border-[#253042] rounded-lg pl-9 pr-3.5 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/70"
-                  />
-                </div>
+                <input
+                  type="password"
+                  required
+                  minLength={4}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••"
+                  className="w-full min-h-[44px] bg-[#090C11] border border-[#253042] rounded-xl px-3.5 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-amber-500/70"
+                />
               </div>
+
+              {error && (
+                <div className="px-3.5 py-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
+                  {error}
+                </div>
+              )}
 
               <button
                 type="submit"
-                disabled={busy}
-                className="w-full py-2.5 px-4 rounded-lg bg-amber-500 text-slate-950 hover:bg-amber-400 disabled:opacity-60 font-semibold text-xs transition-colors inline-flex items-center justify-center gap-2 cursor-pointer"
+                disabled={submitting}
+                className="w-full min-h-[44px] py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 text-sm font-bold transition-colors cursor-pointer"
               >
-                {authTab === 'login' ? (
-                  <>
-                    <LogIn className="w-4 h-4" />
-                    <span>{busy ? 'กำลังตรวจสอบ...' : 'เข้าสู่ระบบ'}</span>
-                  </>
-                ) : (
-                  <>
-                    <UserPlus className="w-4 h-4" />
-                    <span>{busy ? 'กำลังสร้างบัญชี...' : 'สมัครสมาชิกใหม่ (พอร์ตว่าง 0 รายการ)'}</span>
-                  </>
-                )}
+                {submitting
+                  ? 'กำลังดำเนินการ...'
+                  : mode === 'register'
+                  ? 'สร้างบัญชีส่วนตัวในเครื่อง'
+                  : 'เข้าสู่ระบบ'}
               </button>
             </form>
-          </div>
-
-          {/* Switch Account Section */}
-          <div className="pt-4 border-t border-[#1E2634] space-y-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-200">
-                <Users className="w-4 h-4 text-amber-400" />
-                <span>สลับบัญชีผู้ใช้งานในเครื่องนี้ (Switch Account)</span>
-              </div>
-              <span className="text-[11px] text-slate-500 font-mono">
-                {accounts.length + 1} โปรไฟล์
-              </span>
-            </div>
-
-            <div className="space-y-1.5">
-              {/* Guest Profile */}
-              <div
-                className={`flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-xs ${
-                  activeAccountId === GUEST_ACCOUNT_ID
-                    ? 'bg-amber-500/12 border-amber-500/45 text-amber-200'
-                    : 'bg-[#090C11] border-[#1F293A] text-slate-300'
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => handleSwitchAccount(GUEST_ACCOUNT_ID)}
-                  className="flex-1 text-left flex items-center justify-between gap-2 cursor-pointer"
-                >
-                  <span className="font-medium">โหมดผู้เยี่ยมชม (Guest)</span>
-                  <span className="font-mono text-[11px] text-slate-400">
-                    {getAccountPortfolioCount(GUEST_ACCOUNT_ID)} สินทรัพย์
-                  </span>
-                </button>
-                {activeAccountId === GUEST_ACCOUNT_ID && (
-                  <span className="text-[10px] font-semibold text-amber-300">กำลังใช้งาน</span>
-                )}
-              </div>
-
-              {/* Registered Local Accounts */}
-              {accounts.map((acc) => {
-                const isActive = acc.id === activeAccountId;
-                return (
-                  <div
-                    key={acc.id}
-                    className={`flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-xs ${
-                      isActive
-                        ? 'bg-amber-500/12 border-amber-500/45 text-amber-200'
-                        : 'bg-[#090C11] border-[#1F293A] text-slate-300 hover:border-[#2E3C54]'
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => handleSwitchAccount(acc.id)}
-                      className="flex-1 text-left flex items-center justify-between gap-2 min-w-0 cursor-pointer"
-                    >
-                      <span className="truncate">
-                        <strong className="font-medium">{acc.displayName}</strong>{' '}
-                        <span className="font-mono text-[11px] text-slate-400">
-                          (@{acc.username})
-                        </span>
-                      </span>
-                      <span className="font-mono text-[11px] text-slate-400 shrink-0">
-                        {getAccountPortfolioCount(acc.id)} สินทรัพย์
-                      </span>
-                    </button>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {isActive && (
-                        <span className="text-[10px] font-semibold text-amber-300">
-                          กำลังใช้งาน
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteAccount(acc.id, acc.username)}
-                        title={`ลบบัญชี @${acc.username}`}
-                        className="p-1 text-slate-500 hover:text-rose-400 rounded cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Export / Import Portfolio JSON */}
-          <div className="pt-4 border-t border-[#1E2634] space-y-2.5">
-            <div>
-              <div className="text-xs font-semibold text-slate-200">
-                ย้ายข้อมูลพอร์ตข้ามเครื่อง / มือถือ (Export &amp; Import JSON)
-              </div>
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                ส่งออกไฟล์พอร์ตของบัญชีปัจจุบันเพื่อนำไปเปิดใช้งานต่อบนมือถือหรือคอมพิวเตอร์เครื่องอื่นได้ทันที
-              </p>
-            </div>
-            <div className="grid grid-cols-2 gap-2.5">
-              <button
-                type="button"
-                onClick={onExportJson}
-                className="py-2 px-3 rounded-lg bg-[#161E2B] border border-[#253042] hover:border-amber-500/50 text-xs font-medium text-slate-200 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5 text-amber-400" />
-                <span>ส่งออกพอร์ต (Export JSON)</span>
-              </button>
-              <label className="py-2 px-3 rounded-lg bg-[#161E2B] border border-[#253042] hover:border-sky-500/50 text-xs font-medium text-slate-200 inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer">
-                <Upload className="w-3.5 h-3.5 text-sky-400" />
-                <span>นำเข้าพอร์ต (Import JSON)</span>
-                <input
-                  type="file"
-                  accept="application/json,.json"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      onImportJsonFile(file);
-                      e.target.value = '';
-                      setInfoMsg('นำเข้าข้อมูลพอร์ตจากไฟล์ JSON เรียบร้อยแล้ว');
-                    }
-                  }}
-                />
-              </label>
-            </div>
-          </div>
+          )}
         </div>
       </div>
     </div>
