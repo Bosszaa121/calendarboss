@@ -21,6 +21,12 @@ import type {
   SyncSource,
 } from '../types.ts';
 import type { PublicRssHeadline } from './publicMarketFeeds.ts';
+import {
+  ensureThaiClockSuffix,
+  formatThaiNewsTimestamp,
+  getBangkokTodayIso,
+  parseBangkokEventTimestampMs,
+} from './thaiTime.ts';
 
 export const GEMINI_MODEL = 'gemini-3.8-flash';
 export const GEMINI_MODEL_CHAIN = [
@@ -134,11 +140,7 @@ export const BOND_NO_EARNINGS_SYMBOLS = new Set([
 ]);
 
 export function getTodayIso(): string {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  return getBangkokTodayIso();
 }
 
 export function addDaysFromIso(baseIso: string, days: number): string {
@@ -208,15 +210,14 @@ export function getFearGreedLabelTh(value: number): string {
 
 export function extractJsonBlock(rawText: string): string {
   const fenced = rawText.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced && fenced[1]) {
-    return fenced[1].trim();
-  }
-  const firstBrace = rawText.indexOf('{');
-  const lastBrace = rawText.lastIndexOf('}');
+  let body = fenced && fenced[1] ? fenced[1].trim() : rawText.trim();
+  const firstBrace = body.indexOf('{');
+  const lastBrace = body.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    return rawText.slice(firstBrace, lastBrace + 1);
+    body = body.slice(firstBrace, lastBrace + 1);
   }
-  return rawText.trim();
+  // Remove trailing commas before closing ] or } which models occasionally emit
+  return body.replace(/,\s*([}\]])/g, '$1');
 }
 
 export function parsePortfolioPayload(rawPortfolio: unknown): PortfolioEntryInput[] {
@@ -434,11 +435,39 @@ export function parseClassifiedAssetResponse(
 // 2. SINGLE BATCHED REQUEST (Calendar + News + Earnings/XD + Social in 1 Call!)
 // ============================================================================
 
+function selectPriorityCalendarForAi(
+  realCalendarEvents: CalendarEvent[],
+  today: string,
+  maxItems = 28
+): CalendarEvent[] {
+  if (realCalendarEvents.length <= maxItems) return realCalendarEvents;
+  const scored = realCalendarEvents.map((ev) => {
+    const diff = computeCalendarDayDiff(ev.date, today) ?? 99;
+    const isNear = diff >= -1 && diff <= 14 ? 10 : 0;
+    const isMajorCcy =
+      ev.currency === 'USD' ||
+      ev.currency === 'THB' ||
+      ev.currency === 'CNY' ||
+      ev.currency === 'EUR' ||
+      ev.currency === 'JPY' ||
+      ev.currency === 'GBP'
+        ? 4
+        : 0;
+    const score = ev.impact * 20 + isNear + isMajorCcy - Math.abs(diff);
+    return { ev, score };
+  });
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, maxItems)
+    .map((x) => x.ev);
+}
+
 export function buildBatchedInvestCalPrompt(
   portfolioEntries: PortfolioEntryInput[],
   rssHeadlines: PublicRssHeadline[],
   yahooQuotes: Record<string, LiveAssetQuote>,
-  today: string
+  today: string,
+  realCalendarEvents: CalendarEvent[] = []
 ): string {
   const todayThai = getThaiFullDateLabel(today);
   const yesterday = addDaysFromIso(today, -1);
@@ -464,34 +493,52 @@ export function buildBatchedInvestCalPrompt(
           .join('\n')
       : '- พอร์ตยังว่าง (วิเคราะห์ทิศทางต่อสินทรัพย์อ้างอิงหลัก เช่น QQQM, SMH, BLOK, GLD, SLV, KCG, PEP, BTC)';
 
+  const priorityCalendar = selectPriorityCalendarForAi(realCalendarEvents, today, 12);
+  const hasRealCalendar = priorityCalendar.length > 0;
+
+  const calendarBlock = hasRealCalendar
+    ? priorityCalendar
+        .map(
+          (ev) =>
+            `[${ev.id}] ${ev.date} ${ev.time} | ${ev.currency} (${ev.countryNameTh}) | Impact=${
+              ev.impact === 3 ? 'High' : ev.impact === 2 ? 'Medium' : 'Low'
+            } | Title="${ev.originalTitle || ev.title}" | Actual=${ev.actual} | Forecast=${
+              ev.forecast
+            } | Previous=${ev.previous}`
+        )
+        .join('\n')
+    : '(ไม่พบฟีดปฏิทินเศรษฐกิจ ForexFactory ชั่วคราว)';
+
   const rssBlock =
     rssHeadlines.length > 0
       ? rssHeadlines
           .map(
             (r, idx) =>
               `[${idx}] (${r.channelHint}) [${r.source}] ${r.title}${
-                r.pubDate ? ` (${r.pubDate.slice(0, 22)})` : ''
+                r.pubDate ? ` | pubDate: ${r.pubDate}` : ''
               }${r.link ? ` | URL: ${r.link}` : ''}`
           )
           .join('\n')
-      : '(ไม่พบข่าว RSS ชั่วคราว ให้วิเคราะห์เฉพาะเหตุการณ์เศรษฐกิจรอบปกติที่มั่นใจและไม่เดาตัวเลข Actual หรือวัน XD)';
+      : '(ไม่พบข่าว RSS ชั่วคราว)';
 
-  return `คุณเป็นนักวิเคราะห์การเงินและบรรณาธิการข่าวการลงทุนระดับสถาบัน วันนี้คือ ${todayThai} (${today})
-งานของคุณคือวิเคราะห์ **ข้อมูลข่าวสดจริงจาก Google News RSS** และ **ข้อมูลราคา/ปันผลจริงจาก Yahoo Finance** ด้านล่างนี้ เพื่อสร้างข้อมูลครบทั้ง 4 ส่วนของแอป InvestCal ใน JSON ชุดเดียวเท่านั้น
+  return `คุณเป็นนักวิเคราะห์การเงินและบรรณาธิการข่าวการลงทุนระดับสถาบัน วันนี้คือ ${todayThai} (${today}, เวลาประเทศไทย Asia/Bangkok UTC+7)
+งานของคุณคือวิเคราะห์ข้อมูลจริง 3 แหล่งด้านล่างนี้ (แยกปฏิทินเศรษฐกิจจริงออกจากข่าวทั่วไปชัดเจน) เพื่อตอบเป็น JSON ชุดเดียวเท่านั้น
 
-=== 1. สินทรัพย์ในพอร์ตของผู้ใช้ + ข้อมูลจริงจาก Yahoo Finance ===
+=== 1. สินทรัพย์ในพอร์ตของผู้ใช้ + ราคา/ปันผลจริงจาก Yahoo Finance ===
 ${portfolioBlock}
 
-=== 2. หัวข้อข่าวสดจริงจาก Google News RSS (ไทย/อังกฤษ/โซเชียล) ===
+=== 2. ตารางปฏิทินเศรษฐกิจจริงสัปดาห์นี้-สัปดาห์หน้า (ForexFactory — แปลงเป็นเวลาไทย UTC+7 แล้ว) ===
+${calendarBlock}
+
+=== 3. หัวข้อข่าวสดจริงจาก Google News RSS (เรียงจากใหม่ล่าสุด) ===
 ${rssBlock}
 
-กฎเหล็กป้องกันการแต่งข้อมูล (STRICT ANTI-HALLUCINATION RULES):
-1. อ้างอิงข้อเท็จจริงจากข่าว RSS และข้อมูล Yahoo Finance ที่ส่งให้ด้านบนเป็นหลัก ห้ามแต่งตัวเลข Actual ของตัวเลขเศรษฐกิจที่ยังไม่ประกาศ (ให้ใส่ "actual": "—", "actualOutcome": "pending")
-2. ห้ามเดาวันขึ้นเครื่องหมาย XD รอบถัดไปขึ้นมาเองเด็ดขาด! จะใส่ "xdStatus": "announced" และ "xdDate": "YYYY-MM-DD" ได้ก็ต่อเมื่อในข้อมูล Yahoo Finance (upcomingXD) หรือข่าว RSS ด้านบนมีประกาศวัน XD ทางการที่ >= ${today} เท่านั้น มิฉะนั้นต้องตั้ง "xdStatus": "unannounced", "xdDate": null และใส่ข้อมูลปันผลรอบล่าสุดจาก Yahoo Finance (lastPaidXdDate, lastPaidDps, dividendYield)
-3. สินทรัพย์ที่ไม่มีปันผลและไม่อิงงบ (เช่น GLD, SLV, IBIT, BTC, ETH, XAUUSD, XAGUSD, Forex) ให้ตั้ง "applicable": false, "xdStatus": "not_applicable", "status": "not_applicable"
-4. สำหรับ newsItems และ socialInsights ให้แนบ "sourceUrl" จาก URL จริงในรายการ RSS ด้านบนเมื่อตรงกับข่าวนั้น ห้ามแต่ง URL ปลอม
-5. วันที่ทั้งหมดใช้รูปแบบ YYYY-MM-DD เท่านั้น (ช่วงปฏิทิน ${yesterday} ถึง ${endDate}) ห้ามเขียนชื่อวันจันทร์-อาทิตย์เอง
-6. ในปฏิทินเศรษฐกิจ ให้วิเคราะห์ผลกระทบต่อหุ้นจริงในพอร์ตพร้อมทิศทาง "bullish" (ขึ้น), "bearish" (ลง), หรือ "neutral" (คงที่) และเหตุผลภาษาไทยที่กระชับ
+กฎเหล็กป้องกันการแต่งข้อมูล (STRICT RULES):
+1. สำหรับตารางปฏิทินเศรษฐกิจจริงในข้อ 2: ห้ามเปลี่ยนวันที่ เวลา ค่าคาดการณ์ ครั้งก่อน หรือค่าจริงเด็ดขาด! ให้ส่งคืนใน "calendarEnrichments" โดยอ้างอิง "id" เดิมทุกตัวที่สำคัญ เพื่อแปลชื่อตัวเลขเศรษฐกิจเป็นภาษาไทยที่เข้าใจง่าย (วงเล็บชื่ออังกฤษสั้นๆ เช่น "ดัชนีราคาผู้บริโภคพื้นฐานสหรัฐฯ (Core CPI m/m)") พร้อมวิเคราะห์ผลกระทบต่อหุ้นในพอร์ต ("bullish"=ขึ้น, "bearish"=ลง, "neutral"=คงที่)
+2. สำหรับข่าวใน "newsItems": ห้ามนำตารางปฏิทินมาปน ให้ดึงจากหัวข้อข่าวจริงในข้อ 3 เท่านั้น และต้องระบุ "rssIndex" (เลขดัชนี [0], [1], ... ในข้อ 3) พร้อม "sourceUrl" จริง เพื่อให้ระบบแสดงเวลาไทยจริงและเรียงข่าวใหม่สุดได้แม่นยำ 100%
+3. ห้ามเดาวันขึ้นเครื่องหมาย XD รอบถัดไปเองเด็ดขาด! ใส่ "xdStatus": "announced" และ "xdDate": "YYYY-MM-DD" ได้เฉพาะเมื่อมีใน Yahoo Finance (upcomingXD) หรือข่าว RSS ด้านบน >= ${today} เท่านั้น
+4. สินทรัพย์ที่ไม่มีปันผลและไม่อิงงบ (เช่น GLD, SLV, IBIT, BTC, ETH, XAUUSD, XAGUSD, Forex) ให้ตั้ง "applicable": false, "xdStatus": "not_applicable", "status": "not_applicable"
+5. ห้ามแต่ง URL ปลอม หรือแต่งค่า Actual ที่ยังไม่ประกาศ
 
 ตอบกลับเป็น JSON เพียงอย่างเดียวตามโครงสร้างนี้:
 {
@@ -502,30 +549,19 @@ ${rssBlock}
     "oneMonthAgo": <ตัวเลข 1 เดือนก่อน 0-100>,
     "marketNote": "<สรุปบรรยากาศตลาดโลกวันนี้จากข่าว RSS จริง 1 ประโยคภาษาไทย>"
   },
-  "calendarEvents": [
+  "calendarEnrichments": [
     {
-      "date": "<YYYY-MM-DD ระหว่าง ${yesterday} ถึง ${endDate}>",
-      "time": "<HH:mm เวลาไทย ICT หรือ —>",
-      "countryCode": "<US|TH|CN|EU|JP|GB|NZ|AU>",
-      "flag": "<อีโมจิธงชาติ เช่น 🇺🇸 🇹🇭 🇨🇳 🇪🇺 🇯🇵 🇬🇧>",
-      "currency": "<USD|THB|CNY|EUR|JPY|GBP|NZD|AUD>",
-      "countryNameTh": "<ชื่อประเทศภาษาไทย>",
-      "impact": <1 | 2 | 3>,
-      "category": "<economic | earnings | dividend>",
-      "title": "<ชื่อเหตุการณ์เศรษฐกิจหรือข่าวสำคัญภาษาไทยพร้อมชื่อย่ออังกฤษ>",
-      "actual": "<ค่าจริงที่ประกาศในข่าว หรือ — ถ้ายังไม่ประกาศ>",
-      "forecast": "<ค่าคาดการณ์จากข่าว หรือ —>",
-      "previous": "<ค่าครั้งก่อน หรือ —>",
+      "id": "<id ตรงตามรายการในข้อ 2 เช่น ff-2026-...>",
+      "titleTh": "<ชื่อตัวเลขเศรษฐกิจแปลไทยกระชับ พร้อมตัวย่ออังกฤษ>",
+      "descriptionTh": "<คำอธิบายสั้น 1 ประโยคว่าตัวเลขนี้ส่งผลต่อตลาดและดอกเบี้ยอย่างไร>",
       "actualOutcome": "<better | worse | inline | pending>",
       "relatedAssets": ["<Ticker ที่เกี่ยวข้อง>"],
-      "macroTags": ["<เลือกจาก: us_rates, us_inflation, us_jobs, bond_yield, dxy, ai_chips, crypto, precious_metals, bot_rate, thai_cpi, thai_macro, usd_thb, food_dairy, china_macro, boj_jpy, eu_macro, uk_macro>"],
-      "descriptionTh": "<คำอธิบายสั้นๆ 1 ประโยคว่ากระทบตลาดอย่างไร>",
       "assetForecasts": [
         {
           "symbol": "<Ticker ในพอร์ตหรือสินทรัพย์หลักที่เกี่ยวข้อง>",
           "direction": "<bullish | bearish | neutral>",
           "reasonTh": "<เหตุผลสั้นกระชับภาษาไทยว่าทำไมคาดว่าจะขึ้น/ลง/คงที่>",
-          "scenarioNoteTh": "<เงื่อนไขสั้นๆ เช่น หากสูงกว่าคาด -> ลง / ต่ำกว่าคาด -> ขึ้น>"
+          "scenarioNoteTh": "<เช่น หากสูงกว่าคาด -> กดดันลง / ต่ำกว่าคาด -> หนุนขึ้น>"
         }
       ],
       "aiImpacts": [
@@ -538,10 +574,36 @@ ${rssBlock}
         }
       ]
     }
-  ],
+  ],${
+    hasRealCalendar
+      ? ''
+      : `
+  "calendarEvents": [
+    {
+      "date": "<YYYY-MM-DD ระหว่าง ${yesterday} ถึง ${endDate}>",
+      "time": "<HH:mm น. เวลาไทย UTC+7>",
+      "countryCode": "<US|TH|CN|EU|JP|GB>",
+      "flag": "<อีโมจิธงชาติ>",
+      "currency": "<USD|THB|CNY|EUR|JPY|GBP>",
+      "countryNameTh": "<ชื่อประเทศภาษาไทย>",
+      "impact": <1 | 2 | 3>,
+      "category": "<economic | earnings | dividend>",
+      "title": "<ชื่อเหตุการณ์ภาษาไทย>",
+      "actual": "—",
+      "forecast": "—",
+      "previous": "—",
+      "actualOutcome": "pending",
+      "relatedAssets": ["<Ticker>"],
+      "macroTags": ["us_rates"],
+      "descriptionTh": "<คำอธิบาย 1 ประโยค>",
+      "assetForecasts": [],
+      "aiImpacts": []
+    }
+  ],`
+  }
   "newsItems": [
     {
-      "timeLabel": "<เวลาข่าว เช่น วันนี้, ล่าสุด, เมื่อวาน>",
+      "rssIndex": <เลขดัชนี [0..41] จากรายการข่าว RSS ในข้อ 3>,
       "source": "<ชื่อแหล่งข่าวจริงจาก RSS>",
       "sourceUrl": "<URL จริงจากรายการ RSS ด้านบน>",
       "headline": "<พาดหัวข่าวจริงแปลเป็นภาษาไทยกระชับ>",
@@ -600,6 +662,7 @@ ${rssBlock}
   ],
   "socialInsights": [
     {
+      "rssIndex": <เลขดัชนี [0..41] จากรายการข่าว RSS ในข้อ 3 ถ้าตรง>,
       "platform": "<x | facebook | youtube>",
       "channelName": "<ชื่อสำนักข่าว/เพจ/ช่อง YouTube/นักวิเคราะห์จาก RSS>",
       "handleOrPage": "<ชื่อ Handle หรือแพลตฟอร์ม>",
@@ -616,11 +679,15 @@ ${rssBlock}
   ]
 }
 
-จำนวนรายการที่ต้องการในคำขอเดียวนี้:
-- calendarEvents: 8-12 รายการในช่วง ${yesterday} ถึง ${endDate} (ครบหลายประเทศ 🇺🇸 🇹🇭 🇨🇳 🇪🇺 🇯🇵 🇬🇧 พร้อม assetForecasts 2-3 ตัวต่อเหตุการณ์)
-- newsItems: 8-10 ข่าวเด่นจริงจาก RSS ด้านบน
+จำนวนรายการที่ต้องการ (ตอบกระชับ เป็น JSON ที่ถูกต้อง 100% ห้ามใส่คอมเมนต์ใน JSON):
+${
+  hasRealCalendar
+    ? '- calendarEnrichments: แปลไทยและวิเคราะห์ผลกระทบครบทุก id ในข้อ 2 (assetForecasts สูงสุด 2 ตัว/เหตุการณ์, aiImpacts สูงสุด 2 ตัว/เหตุการณ์)'
+    : `- calendarEvents: 6-8 เหตุการณ์เศรษฐกิจสำคัญระหว่าง ${yesterday} ถึง ${endDate} ที่มีปรากฏในข่าว RSS ข้อ 3 (ระบุเวลาไทย HH:mm น. UTC+7 ให้ตรงตามเวลาตลาดโลก เช่น 20:30 น. / 01:00 น.)`
+}
+- newsItems: 8-10 ข่าวเด่นจริงจากข้อ 3 (ระบุ rssIndex ที่ถูกต้องทุกข่าว, aiImpacts สูงสุด 2 ตัว/ข่าว)
 - earnings และ dividends: ครบทุกสินทรัพย์ในพอร์ตจริงของผู้ใช้ (ถ้าพอร์ตว่างให้ใส่ [])
-- socialInsights: 9 รายการ (แบ่งเป็น x, facebook, youtube แพลตฟอร์มละ 3 รายการ อิงจากข่าว RSS ด้านบนพร้อมลิงก์จริง)`;
+- socialInsights: 6 รายการ (x, facebook, youtube แพลตฟอร์มละ 2 รายการ อิงจากข่าวจริงพร้อมลิงก์จริง)`;
 }
 
 function buildSourcesFromRssAndYahoo(
@@ -864,18 +931,81 @@ export function parseBatchedInvestCalResponse(
   portfolioEntries: PortfolioEntryInput[],
   rssHeadlines: PublicRssHeadline[],
   yahooQuotes: Record<string, LiveAssetQuote>,
-  today: string
+  today: string,
+  realCalendarEvents: CalendarEvent[] = []
 ): BatchedSyncResponse {
   const parsed = JSON.parse(extractJsonBlock(rawText || '{}')) as Record<string, unknown>;
-  const syncedAt = new Date().toISOString();
+  const nowMs = Date.now();
+  const syncedAt = new Date(nowMs).toISOString();
   const sources = buildSourcesFromRssAndYahoo(rssHeadlines, yahooQuotes);
 
-  const calendarEvents: CalendarEvent[] = Array.isArray(parsed.calendarEvents)
+  // 1. Merge Gemini Thai translations & portfolio impact analysis onto REAL ForexFactory UTC+7 events
+  const enrichmentById = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(parsed.calendarEnrichments)) {
+    for (const rawEnr of parsed.calendarEnrichments) {
+      if (!rawEnr || typeof rawEnr !== 'object') continue;
+      const enr = rawEnr as Record<string, unknown>;
+      const id = typeof enr.id === 'string' ? enr.id.trim() : '';
+      if (id) enrichmentById.set(id, enr);
+    }
+  }
+
+  const mergedRealCalendar: CalendarEvent[] = realCalendarEvents.map((baseEv) => {
+    const enr = enrichmentById.get(baseEv.id);
+    if (!enr) return baseEv;
+
+    const titleTh =
+      typeof enr.titleTh === 'string' && enr.titleTh.trim()
+        ? enr.titleTh.trim().slice(0, 160)
+        : baseEv.title;
+    const descriptionTh =
+      typeof enr.descriptionTh === 'string' && enr.descriptionTh.trim()
+        ? enr.descriptionTh.trim().slice(0, 260)
+        : baseEv.descriptionTh;
+    const relatedAssets = Array.isArray(enr.relatedAssets)
+      ? Array.from(
+          new Set([
+            ...enr.relatedAssets
+              .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+              .map((x) => x.trim().toUpperCase()),
+            ...baseEv.relatedAssets,
+          ])
+        ).slice(0, 8)
+      : baseEv.relatedAssets;
+
+    const actualOutcome =
+      baseEv.actual === '—'
+        ? 'pending'
+        : enr.actualOutcome === 'better' ||
+          enr.actualOutcome === 'worse' ||
+          enr.actualOutcome === 'inline'
+        ? enr.actualOutcome
+        : baseEv.actualOutcome;
+
+    return {
+      ...baseEv,
+      title: titleTh,
+      descriptionTh,
+      actualOutcome,
+      relatedAssets,
+      assetForecasts: sanitizeForecasts(enr.assetForecasts),
+      aiImpacts: sanitizeAiImpacts(enr.aiImpacts),
+    };
+  });
+
+  // 2. Parse optional extra calendar events (earnings/dividends or fallback if ForexFactory was unreachable)
+  const extraAiCalendar: CalendarEvent[] = Array.isArray(parsed.calendarEvents)
     ? parsed.calendarEvents
         .map((rawEv, idx): CalendarEvent | null => {
           const ev = (rawEv && typeof rawEv === 'object' ? rawEv : {}) as Record<string, unknown>;
           const validDate = parseValidIsoDate(ev.date);
           if (!validDate) return null;
+          const category =
+            ev.category === 'earnings' || ev.category === 'dividend' ? ev.category : 'economic';
+          // When real ForexFactory economic events are present, avoid duplicate AI-invented economic entries
+          if (mergedRealCalendar.length > 0 && category === 'economic') {
+            return null;
+          }
           const diff = computeCalendarDayDiff(validDate, today);
           const rawActual =
             typeof ev.actual === 'string' && ev.actual.trim() ? ev.actual.trim() : '—';
@@ -888,11 +1018,16 @@ export function parseBatchedInvestCalResponse(
                 ev.actualOutcome === 'inline'
               ? ev.actualOutcome
               : 'pending';
+          const formattedTime = ensureThaiClockSuffix(
+            typeof ev.time === 'string' ? ev.time : '—'
+          );
+          const tsMs = parseBangkokEventTimestampMs(validDate, formattedTime);
 
           return {
-            id: `live-ev-${Date.now()}-${idx}`,
+            id: `live-ev-${nowMs}-${idx}`,
             date: validDate,
-            time: typeof ev.time === 'string' && ev.time.trim() ? ev.time.trim() : '—',
+            time: formattedTime,
+            eventTimestampIso: tsMs ? new Date(tsMs).toISOString() : undefined,
             countryCode:
               typeof ev.countryCode === 'string' ? ev.countryCode.trim().toUpperCase() : 'US',
             flag: typeof ev.flag === 'string' && ev.flag.trim() ? ev.flag.trim() : '🌐',
@@ -901,10 +1036,7 @@ export function parseBatchedInvestCalResponse(
             countryNameTh:
               typeof ev.countryNameTh === 'string' ? ev.countryNameTh.trim() : 'ต่างประเทศ',
             impact: ev.impact === 3 || ev.impact === 2 || ev.impact === 1 ? ev.impact : 2,
-            category:
-              ev.category === 'earnings' || ev.category === 'dividend'
-                ? ev.category
-                : 'economic',
+            category,
             title: typeof ev.title === 'string' ? ev.title.trim() : '',
             actual,
             forecast:
@@ -925,10 +1057,22 @@ export function parseBatchedInvestCalResponse(
           };
         })
         .filter((x): x is CalendarEvent => Boolean(x && x.title.length > 0))
-        .sort((a, b) =>
-          a.date === b.date ? a.time.localeCompare(b.time) : a.date.localeCompare(b.date)
-        )
     : [];
+
+  const calendarEvents: CalendarEvent[] = [...mergedRealCalendar, ...extraAiCalendar].sort(
+    (a, b) => {
+      const aMs = a.eventTimestampIso ? Date.parse(a.eventTimestampIso) : 0;
+      const bMs = b.eventTimestampIso ? Date.parse(b.eventTimestampIso) : 0;
+      if (aMs && bMs && aMs !== bMs) return aMs - bMs;
+      return a.date === b.date ? a.time.localeCompare(b.time) : a.date.localeCompare(b.date);
+    }
+  );
+
+  // 3. Parse newsItems with REAL RSS pubDate converted to Asia/Bangkok (UTC+7) + relative time, sorted NEWEST FIRST
+  const rssByUrl = new Map<string, PublicRssHeadline>();
+  for (const r of rssHeadlines) {
+    if (r.link) rssByUrl.set(r.link, r);
+  }
 
   const newsItems: NewsItem[] = Array.isArray(parsed.newsItems)
     ? parsed.newsItems
@@ -938,22 +1082,37 @@ export function parseBatchedInvestCalResponse(
             unknown
           >;
           const rawUrl = typeof item.sourceUrl === 'string' ? item.sourceUrl.trim() : '';
-          const fallbackUrl = rssHeadlines[idx]?.link;
+          const rssIdx =
+            typeof item.rssIndex === 'number' &&
+            Number.isInteger(item.rssIndex) &&
+            item.rssIndex >= 0 &&
+            item.rssIndex < rssHeadlines.length
+              ? item.rssIndex
+              : -1;
+
+          const matchedRss =
+            (rssIdx >= 0 ? rssHeadlines[rssIdx] : undefined) ||
+            (rawUrl ? rssByUrl.get(rawUrl) : undefined) ||
+            rssHeadlines[idx];
+
           const safeUrl =
             rawUrl.startsWith('https://') || rawUrl.startsWith('http://')
               ? rawUrl
-              : fallbackUrl || undefined;
+              : matchedRss?.link || undefined;
+
+          const formattedTs = formatThaiNewsTimestamp(
+            matchedRss?.pubDate || syncedAt,
+            nowMs
+          );
+
           return {
-            id: `live-news-${Date.now()}-${idx}`,
-            publishedAt: syncedAt,
-            timeLabel:
-              typeof item.timeLabel === 'string' && item.timeLabel.trim()
-                ? item.timeLabel.trim()
-                : 'ล่าสุดวันนี้',
+            id: `live-news-${nowMs}-${idx}`,
+            publishedAt: formattedTs.publishedAt,
+            timeLabel: formattedTs.timeLabel,
             source:
               typeof item.source === 'string' && item.source.trim()
                 ? item.source.trim()
-                : rssHeadlines[idx]?.source || 'Google News RSS',
+                : matchedRss?.source || 'Google News RSS',
             sourceUrl: safeUrl,
             headline: typeof item.headline === 'string' ? item.headline.trim() : '',
             impactSummary:
@@ -981,6 +1140,7 @@ export function parseBatchedInvestCalResponse(
           };
         })
         .filter((n) => n.headline.length > 0)
+        .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))
     : [];
 
   let fearGreed: Partial<FearGreedData> | undefined;
@@ -1192,33 +1352,39 @@ export function buildPublicOnlyFallbackBatchedResponse(
   rssHeadlines: PublicRssHeadline[],
   yahooQuotes: Record<string, LiveAssetQuote>,
   today: string,
-  aiWarning: string
+  aiWarning: string,
+  realCalendarEvents: CalendarEvent[] = []
 ): BatchedSyncResponse {
-  const syncedAt = new Date().toISOString();
+  const nowMs = Date.now();
+  const syncedAt = new Date(nowMs).toISOString();
   const sources = buildSourcesFromRssAndYahoo(rssHeadlines, yahooQuotes);
   const heldSymbols = portfolioEntries.map((p) => p.symbol);
 
-  const newsItems: NewsItem[] = rssHeadlines.slice(0, 14).map((r, idx) => {
-    const matched = heldSymbols.filter((sym) =>
-      r.title.toUpperCase().includes(sym.toUpperCase())
-    );
-    const isThai = /[\u0E00-\u0E7F]/.test(r.title);
-    return {
-      id: `rss-news-${Date.now()}-${idx}`,
-      publishedAt: syncedAt,
-      timeLabel: r.pubDate ? r.pubDate.slice(0, 16) : 'ล่าสุดวันนี้',
-      source: r.source,
-      sourceUrl: r.link || undefined,
-      headline: r.title,
-      impactSummary: `ข่าวจริงล่าสุดจาก ${r.source} (กดลิงก์ต้นฉบับเพื่ออ่านรายละเอียดเพิ่มเติม)`,
-      sentiment: 'neutral',
-      relatedAssets: matched,
-      macroTags: isThai ? ['thai_macro'] : ['us_rates'],
-      countryCode: isThai ? 'TH' : 'US',
-      countryFlag: isThai ? '🇹🇭' : '🇺🇸',
-      isLiveSynced: true,
-    };
-  });
+  const newsItems: NewsItem[] = rssHeadlines
+    .slice(0, 14)
+    .map((r, idx) => {
+      const matched = heldSymbols.filter((sym) =>
+        r.title.toUpperCase().includes(sym.toUpperCase())
+      );
+      const isThai = /[\u0E00-\u0E7F]/.test(r.title);
+      const formattedTs = formatThaiNewsTimestamp(r.pubDate || syncedAt, nowMs);
+      return {
+        id: `rss-news-${nowMs}-${idx}`,
+        publishedAt: formattedTs.publishedAt,
+        timeLabel: formattedTs.timeLabel,
+        source: r.source,
+        sourceUrl: r.link || undefined,
+        headline: r.title,
+        impactSummary: `ข่าวจริงล่าสุดจาก ${r.source} (กดลิงก์ต้นฉบับเพื่ออ่านรายละเอียดเพิ่มเติม)`,
+        sentiment: 'neutral' as const,
+        relatedAssets: matched,
+        macroTags: isThai ? ['thai_macro'] : ['us_rates'],
+        countryCode: isThai ? 'TH' : 'US',
+        countryFlag: isThai ? '🇹🇭' : '🇺🇸',
+        isLiveSynced: true,
+      };
+    })
+    .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
 
   const socialInsights: SocialInsightItem[] = rssHeadlines.slice(0, 9).map((r, idx) => {
     const platform: SocialPlatform =
@@ -1235,12 +1401,13 @@ export function buildPublicOnlyFallbackBatchedResponse(
       r.title.toUpperCase().includes(sym.toUpperCase())
     );
     const isThai = /[\u0E00-\u0E7F]/.test(r.title);
+    const formattedTs = formatThaiNewsTimestamp(r.pubDate || syncedAt, nowMs);
     return {
-      id: `rss-soc-${Date.now()}-${idx}`,
+      id: `rss-soc-${nowMs}-${idx}`,
       platform,
       channelName: r.source,
       handleOrPage: r.source,
-      timeLabel: 'ล่าสุดวันนี้',
+      timeLabel: formattedTs.timeLabel,
       title: r.title,
       deepSummaryTh: `หัวข้อข่าวและประเด็นตลาดจริงล่าสุดจาก ${r.source} — เปิดอ่านต้นฉบับผ่านปุ่มลิงก์ด้านล่าง`,
       analystViewTh: 'รอ AI วิเคราะห์เชิงลึกเพิ่มเติมเมื่อโควตา Gemini API พร้อมใช้งาน',
@@ -1256,7 +1423,7 @@ export function buildPublicOnlyFallbackBatchedResponse(
   const dividends = reconcileDividendsWithYahoo([], portfolioEntries, yahooQuotes, today);
 
   return {
-    calendarEvents: [],
+    calendarEvents: realCalendarEvents,
     newsItems,
     fearGreed: undefined,
     earnings: [],

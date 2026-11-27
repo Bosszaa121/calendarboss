@@ -9,6 +9,7 @@ import {
   PortfolioAsset,
   PortfolioImpactDetail,
 } from '../types';
+import { getBangkokTodayIso } from './thaiTime';
 
 export function normalizeSymbol(raw: string): string {
   return raw.trim().toUpperCase().replace(/[^A-Z0-9./-]/g, '');
@@ -593,10 +594,10 @@ export function getMatchedPortfolioSymbols(
 export function getDayDiffFromToday(isoDate: string): number {
   const parts = isoDate.split('-').map(Number);
   if (parts.length !== 3 || parts.some(Number.isNaN)) return 0;
-  const target = new Date(parts[0], parts[1] - 1, parts[2]);
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  return Math.round((target.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  const todayParts = getBangkokTodayIso().split('-').map(Number);
+  const targetUtc = Date.UTC(parts[0], parts[1] - 1, parts[2]);
+  const todayUtc = Date.UTC(todayParts[0], todayParts[1] - 1, todayParts[2]);
+  return Math.round((targetUtc - todayUtc) / 86_400_000);
 }
 
 export function matchesDateTab(isoDate: string, tab: DateTabKey): boolean {

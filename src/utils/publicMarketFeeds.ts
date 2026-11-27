@@ -1,17 +1,21 @@
 import type {
   AssetCategory,
+  CalendarEvent,
   ChartCandle,
   ChartHistoryResponse,
   ChartTimeframe,
+  ImpactLevel,
   LiveAssetQuote,
 } from '../types.ts';
 import type { ClassifiedAssetResult, PortfolioEntryInput } from './geminiParsers.ts';
+import { toBangkokDateParts } from './thaiTime.ts';
 
 export interface PublicRssHeadline {
   title: string;
   link: string;
   source: string;
   pubDate: string;
+  publishedAtMs: number;
   channelHint: 'macro' | 'portfolio' | 'social_x' | 'social_fb' | 'social_yt';
 }
 
@@ -81,11 +85,13 @@ function parseRssXmlItems(
       cleanTitle = cleanTitle.slice(0, -(` - ${source}`.length)).trim();
     }
 
+    const parsedMs = pubDate ? Date.parse(pubDate) : NaN;
     items.push({
       title: cleanTitle.slice(0, 180),
       link: link.startsWith('http') ? link : '',
       source: source.slice(0, 60) || 'Google News',
       pubDate,
+      publishedAtMs: Number.isFinite(parsedMs) ? parsedMs : 0,
       channelHint,
     });
   }
@@ -142,11 +148,13 @@ export async function fetchGoogleNewsRss(
             source = rawTitle.slice(dashIdx + 3).trim();
             title = rawTitle.slice(0, dashIdx).trim();
           }
+          const parsedMs = it.pubDate ? Date.parse(it.pubDate) : NaN;
           return {
             title: title.slice(0, 180),
             link: typeof it.link === 'string' && it.link.startsWith('http') ? it.link : '',
             source: source.slice(0, 60) || 'Google News',
             pubDate: it.pubDate || '',
+            publishedAtMs: Number.isFinite(parsedMs) ? parsedMs : 0,
             channelHint,
           };
         });
@@ -246,7 +254,294 @@ export async function collectLivePublicRssNews(
     }
   }
 
+  combined.sort((a, b) => (b.publishedAtMs || 0) - (a.publishedAtMs || 0));
   return combined.slice(0, 42);
+}
+
+// ============================================================================
+// Real Economic Calendar Feed (ForexFactory Public JSON — This Week + Next Week)
+// Converted strictly to Asia/Bangkok (UTC+7) 24-hour format matching Investing.com
+// ============================================================================
+
+export const FF_CALENDAR_THIS_WEEK_URL =
+  'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
+export const FF_CALENDAR_NEXT_WEEK_URL =
+  'https://nfs.faireconomy.media/ff_calendar_nextweek.json';
+
+interface RawForexFactoryEvent {
+  title?: string;
+  country?: string;
+  date?: string;
+  impact?: string;
+  forecast?: string;
+  previous?: string;
+  actual?: string;
+}
+
+const CURRENCY_META: Record<
+  string,
+  {
+    countryCode: string;
+    flag: string;
+    countryNameTh: string;
+    baseMacroTags: string[];
+    defaultAssets: string[];
+  }
+> = {
+  USD: {
+    countryCode: 'US',
+    flag: '🇺🇸',
+    countryNameTh: 'สหรัฐฯ',
+    baseMacroTags: ['us_rates', 'dxy'],
+    defaultAssets: ['QQQM', 'SPY', 'GLD', 'DXY'],
+  },
+  THB: {
+    countryCode: 'TH',
+    flag: '🇹🇭',
+    countryNameTh: 'ไทย',
+    baseMacroTags: ['thai_macro', 'bot_rate', 'usd_thb'],
+    defaultAssets: ['SET', 'USD/THB'],
+  },
+  CNY: {
+    countryCode: 'CN',
+    flag: '🇨🇳',
+    countryNameTh: 'จีน',
+    baseMacroTags: ['china_macro'],
+    defaultAssets: ['GLD', 'SLV', 'KCG'],
+  },
+  EUR: {
+    countryCode: 'EU',
+    flag: '🇪🇺',
+    countryNameTh: 'ยุโรป',
+    baseMacroTags: ['eu_macro'],
+    defaultAssets: ['EUR/USD', 'DXY'],
+  },
+  JPY: {
+    countryCode: 'JP',
+    flag: '🇯🇵',
+    countryNameTh: 'ญี่ปุ่น',
+    baseMacroTags: ['boj_jpy'],
+    defaultAssets: ['USD/JPY', 'QQQM'],
+  },
+  GBP: {
+    countryCode: 'GB',
+    flag: '🇬🇧',
+    countryNameTh: 'อังกฤษ',
+    baseMacroTags: ['uk_macro'],
+    defaultAssets: ['GBP/USD', 'DXY'],
+  },
+  AUD: {
+    countryCode: 'AU',
+    flag: '🇦🇺',
+    countryNameTh: 'ออสเตรเลีย',
+    baseMacroTags: ['china_demand', 'precious_metals'],
+    defaultAssets: ['AUD/USD', 'GLD'],
+  },
+  NZD: {
+    countryCode: 'NZ',
+    flag: '🇳🇿',
+    countryNameTh: 'นิวซีแลนด์',
+    baseMacroTags: ['food_dairy'],
+    defaultAssets: ['KCG'],
+  },
+  CAD: {
+    countryCode: 'CA',
+    flag: '🇨🇦',
+    countryNameTh: 'แคนาดา',
+    baseMacroTags: ['oil_commodity'],
+    defaultAssets: ['WTI'],
+  },
+  CHF: {
+    countryCode: 'CH',
+    flag: '🇨🇭',
+    countryNameTh: 'สวิตเซอร์แลนด์',
+    baseMacroTags: ['eu_macro', 'precious_metals'],
+    defaultAssets: ['GLD'],
+  },
+};
+
+function inferCalendarMacroTags(currency: string, title: string): string[] {
+  const meta = CURRENCY_META[currency];
+  const tags = new Set<string>(meta ? meta.baseMacroTags : ['us_rates']);
+  const lower = title.toLowerCase();
+
+  if (
+    lower.includes('cpi') ||
+    lower.includes('ppi') ||
+    lower.includes('pce') ||
+    lower.includes('inflation')
+  ) {
+    tags.add(currency === 'THB' ? 'thai_cpi' : 'us_inflation');
+    tags.add('bond_yield');
+    tags.add('precious_metals');
+  }
+  if (
+    lower.includes('payroll') ||
+    lower.includes('unemployment') ||
+    lower.includes('jobless') ||
+    lower.includes('employment') ||
+    lower.includes('jolts') ||
+    lower.includes('adp') ||
+    lower.includes('wage')
+  ) {
+    tags.add('us_jobs');
+    tags.add('us_rates');
+  }
+  if (
+    lower.includes('fomc') ||
+    lower.includes('fed') ||
+    lower.includes('powell') ||
+    lower.includes('rate') ||
+    lower.includes('interest') ||
+    lower.includes('monetary policy')
+  ) {
+    tags.add('us_rates');
+    tags.add('bond_yield');
+    tags.add('dxy');
+    tags.add('crypto');
+  }
+  if (lower.includes('gdp') || lower.includes('pmi') || lower.includes('retail sales')) {
+    tags.add(currency === 'CNY' ? 'china_macro' : 'us_rates');
+  }
+  if (lower.includes('dairy') || lower.includes('gdt')) {
+    tags.add('food_dairy');
+  }
+  if (lower.includes('oil') || lower.includes('crude')) {
+    tags.add('oil_commodity');
+  }
+  return Array.from(tags);
+}
+
+function mapForexFactoryImpact(rawImpact: string | undefined): ImpactLevel | null {
+  const lower = (rawImpact || '').trim().toLowerCase();
+  if (lower === 'high') return 3;
+  if (lower === 'medium') return 2;
+  if (lower === 'low') return 1;
+  return null; // Skip Holiday / Non-Economic noise
+}
+
+let ffCalendarCache: { events: CalendarEvent[]; fetchedAt: number; expiresAt: number } | null =
+  null;
+const FF_CALENDAR_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes normal cache
+const FF_CALENDAR_MIN_REFETCH_MS = 5 * 60 * 1000; // Never hit ForexFactory faster than 5 min (prevents HTTP 429)
+
+export async function collectLiveEconomicCalendar(
+  useCorsProxy = false,
+  forceRefresh = false
+): Promise<CalendarEvent[]> {
+  const now = Date.now();
+  if (ffCalendarCache) {
+    if (!forceRefresh && now < ffCalendarCache.expiresAt) {
+      return ffCalendarCache.events;
+    }
+    if (forceRefresh && now - ffCalendarCache.fetchedAt < FF_CALENDAR_MIN_REFETCH_MS) {
+      return ffCalendarCache.events;
+    }
+  }
+
+  // Fetch sequentially with a tiny gap to avoid tripping ForexFactory Cloudflare burst 429
+  const rawResults: Array<RawForexFactoryEvent[] | null> = [];
+  const thisWeek = await fetchJsonViaOptionalProxy<RawForexFactoryEvent[]>(
+    FF_CALENDAR_THIS_WEEK_URL,
+    useCorsProxy
+  );
+  rawResults.push(thisWeek);
+
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const nextWeek = await fetchJsonViaOptionalProxy<RawForexFactoryEvent[]>(
+    FF_CALENDAR_NEXT_WEEK_URL,
+    useCorsProxy
+  );
+  rawResults.push(nextWeek);
+
+  const dedup = new Map<string, CalendarEvent>();
+
+  for (const list of rawResults) {
+    if (!Array.isArray(list)) continue;
+
+    for (const raw of list) {
+      const originalTitle = typeof raw.title === 'string' ? raw.title.trim() : '';
+      const rawDate = typeof raw.date === 'string' ? raw.date.trim() : '';
+      if (!originalTitle || !rawDate) continue;
+
+      const impact = mapForexFactoryImpact(raw.impact);
+      if (!impact) continue;
+
+      const bkk = toBangkokDateParts(rawDate);
+      if (!bkk) continue;
+
+      const currency = (typeof raw.country === 'string' ? raw.country : 'USD')
+        .trim()
+        .toUpperCase();
+      const meta = CURRENCY_META[currency] || {
+        countryCode: currency.slice(0, 2) || 'GL',
+        flag: '🌐',
+        countryNameTh: currency || 'ต่างประเทศ',
+        baseMacroTags: ['us_rates'],
+        defaultAssets: ['QQQM', 'GLD'],
+      };
+
+      const forecast =
+        typeof raw.forecast === 'string' && raw.forecast.trim() ? raw.forecast.trim() : '—';
+      const previous =
+        typeof raw.previous === 'string' && raw.previous.trim() ? raw.previous.trim() : '—';
+      const actual =
+        typeof raw.actual === 'string' && raw.actual.trim() ? raw.actual.trim() : '—';
+
+      const dedupKey = `${bkk.dateIso}|${bkk.time24}|${currency}|${originalTitle.toLowerCase()}`;
+      if (dedup.has(dedupKey)) continue;
+
+      const stableId = `ff-${bkk.dateIso}-${bkk.time24.replace(':', '')}-${currency}-${dedup.size}`;
+      const impactTextTh =
+        impact === 3 ? 'ความสำคัญสูง (High Impact)' : impact === 2 ? 'ความสำคัญปานกลาง' : 'ความสำคัญน้อย';
+
+      dedup.set(dedupKey, {
+        id: stableId,
+        date: bkk.dateIso,
+        time: bkk.timeLabelTh, // e.g. "20:30 น.", "01:00 น." (Asia/Bangkok UTC+7)
+        eventTimestampIso: bkk.isoUtc,
+        originalTitle,
+        sourceProvider: 'ForexFactory',
+        countryCode: meta.countryCode,
+        flag: meta.flag,
+        currency,
+        countryNameTh: meta.countryNameTh,
+        impact,
+        category: 'economic',
+        title: `${originalTitle} (${currency})`,
+        actual,
+        forecast,
+        previous,
+        actualOutcome: actual === '—' ? 'pending' : 'inline',
+        relatedAssets: meta.defaultAssets,
+        macroTags: inferCalendarMacroTags(currency, originalTitle),
+        descriptionTh: `ตัวเลขเศรษฐกิจ ${meta.countryNameTh} (${currency}) ระดับ${impactTextTh} · ประกาศเวลาไทย ${bkk.timeLabelTh}`,
+        isLiveSynced: true,
+      });
+    }
+  }
+
+  const events = Array.from(dedup.values()).sort((a, b) => {
+    const aMs = a.eventTimestampIso ? Date.parse(a.eventTimestampIso) : 0;
+    const bMs = b.eventTimestampIso ? Date.parse(b.eventTimestampIso) : 0;
+    return aMs - bMs;
+  });
+
+  if (events.length > 0) {
+    ffCalendarCache = {
+      events,
+      fetchedAt: Date.now(),
+      expiresAt: Date.now() + FF_CALENDAR_CACHE_TTL_MS,
+    };
+    return events;
+  }
+
+  // Fallback to stale cached ForexFactory events if upstream temporarily returned 429
+  if (ffCalendarCache && ffCalendarCache.events.length > 0) {
+    return ffCalendarCache.events;
+  }
+
+  return [];
 }
 
 // ============================================================================

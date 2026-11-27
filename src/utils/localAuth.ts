@@ -198,3 +198,52 @@ export function deleteLocalAccount(accountId: string): LocalUserAccount[] {
   }
   return next;
 }
+
+/**
+ * Links or updates a cloud-authenticated account in local profile cache
+ * so the user's portfolio works smoothly offline and across device sessions.
+ */
+export async function upsertCloudAccountLocally(params: {
+  username: string;
+  displayName: string;
+  password?: string;
+  portfolio: PortfolioAsset[];
+}): Promise<{ account: LocalUserAccount; accounts: LocalUserAccount[] }> {
+  const existing = loadLocalAccounts();
+  const cleanedLower = params.username.trim().toLowerCase();
+  const foundIdx = existing.findIndex((a) => a.username.toLowerCase() === cleanedLower);
+
+  let account: LocalUserAccount;
+  let nextAccounts: LocalUserAccount[];
+
+  if (foundIdx >= 0) {
+    const prev = existing[foundIdx];
+    const nextHash = params.password
+      ? await hashPassword(params.password, prev.salt)
+      : prev.passwordHash;
+    account = {
+      ...prev,
+      displayName: (params.displayName || prev.displayName).slice(0, 48),
+      passwordHash: nextHash,
+    };
+    nextAccounts = existing.map((a, idx) => (idx === foundIdx ? account : a));
+  } else {
+    const salt = generateSalt();
+    const passwordHash = await hashPassword(params.password || generateSalt(), salt);
+    account = {
+      id: `cloud-${cleanedLower}`,
+      username: params.username.trim(),
+      displayName: (params.displayName || params.username).slice(0, 48),
+      passwordHash,
+      salt,
+      createdAt: new Date().toISOString(),
+    };
+    nextAccounts = [...existing, account];
+  }
+
+  saveLocalAccounts(nextAccounts);
+  savePortfolioForAccount(account.id, params.portfolio);
+  saveActiveAccountId(account.id);
+  return { account, accounts: nextAccounts };
+}
+

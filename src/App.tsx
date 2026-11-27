@@ -47,6 +47,7 @@ import {
   fireChromeNotification,
   getBrowserNotificationPermission,
   requestChromeNotificationPermission,
+  schedulePreEventCalendarNotifications,
   sendTestChromeNotification,
 } from './utils/alertEngine';
 import {
@@ -59,6 +60,16 @@ import {
 } from './utils/liveDataCache';
 import { markServedFromCache } from './utils/quotaTracker';
 import { syncBatchedInvestCalLive } from './services/geminiService';
+import {
+  checkCloudSyncConfigured,
+  CloudSyncState,
+  hasCloudSessionToken,
+  mergeCloudAndLocalPortfolios,
+  pullCloudAccountData,
+  saveCloudAccountData,
+} from './services/userSyncService';
+import { formatBangkokClockNow } from './utils/thaiTime';
+import { syncPortfolioToServiceWorker, tryRegisterPeriodicSync } from './utils/pwaSync';
 import { DashboardView } from './components/DashboardView';
 import { PortfolioView } from './components/PortfolioView';
 import { CalendarView } from './components/CalendarView';
@@ -135,10 +146,7 @@ function loadReadAlertsForAccount(accountId: string): Set<string> {
 }
 
 function formatThaiTimeNow(): string {
-  return new Date().toLocaleTimeString('th-TH', {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  return formatBangkokClockNow();
 }
 
 export default function App() {
@@ -165,7 +173,7 @@ export default function App() {
     [portfolio]
   );
 
-  // Hydrate strictly from 6-hour unified batched cache (Zero Mock Data)
+  // Hydrate strictly from 2-hour unified batched cache (Zero Mock Data)
   const initialBundle = useMemo(() => {
     const acct = loadActiveAccountId(loadLocalAccounts());
     const initPort = loadPortfolioForAccount(acct);
@@ -217,14 +225,39 @@ export default function App() {
     message: string;
   } | null>(null);
 
+  // Cloud Sync (Upstash Redis) state
+  const [cloudConfigured, setCloudConfigured] = useState<boolean>(true);
+  const [cloudSyncState, setCloudSyncState] = useState<CloudSyncState>('idle');
+  const [cloudLastSyncedAt, setCloudLastSyncedAt] = useState<string | null>(null);
+
   const batchedReqIdRef = useRef(0);
+  const isSyncingRef = useRef(false);
+  isSyncingRef.current = isSyncing;
+
+  const isCoolingDownRef = useRef(false);
+  isCoolingDownRef.current = quota.isCoolingDown;
+
+  const lastSyncedEpochRef = useRef<number>(
+    initialBundle?.syncedAt ? Date.parse(initialBundle.syncedAt) || 0 : 0
+  );
+
   const portfolioRef = useRef<PortfolioAsset[]>(portfolio);
   portfolioRef.current = portfolio;
 
   const activeAccountIdRef = useRef<string>(activeAccountId);
   activeAccountIdRef.current = activeAccountId;
 
-  // Reload isolated portfolio & 6-hour batched cache whenever activeAccountId switches
+  // Check if Upstash Redis is configured on the server
+  useEffect(() => {
+    void checkCloudSyncConfigured().then((configured) => {
+      setCloudConfigured(configured);
+      if (!configured) {
+        setCloudSyncState('local_only');
+      }
+    });
+  }, []);
+
+  // Reload isolated portfolio & 2-hour batched cache whenever activeAccountId switches
   useEffect(() => {
     const nextPortfolio = loadPortfolioForAccount(activeAccountId);
     const nextSig = buildPortfolioSignature(nextPortfolio.map((p) => p.symbol));
@@ -241,6 +274,7 @@ export default function App() {
     setLiveQuotes(cached?.quotes ?? {});
     setSyncSources(cached?.sources ?? []);
     setLastSyncedAt(cached?.syncedTimeLabel ?? null);
+    lastSyncedEpochRef.current = cached?.syncedAt ? Date.parse(cached.syncedAt) || 0 : 0;
     setSyncError(null);
   }, [activeAccountId]);
 
@@ -248,6 +282,28 @@ export default function App() {
     () => accounts.find((a) => a.id === activeAccountId) ?? null,
     [accounts, activeAccountId]
   );
+
+  // Reflect cloud auth state whenever active account changes
+  useEffect(() => {
+    if (!cloudConfigured) {
+      setCloudSyncState('local_only');
+      return;
+    }
+    if (!activeAccount) {
+      setCloudSyncState('idle');
+      return;
+    }
+    if (hasCloudSessionToken(activeAccount.username)) {
+      setCloudSyncState((prev) => (prev === 'syncing' ? 'syncing' : 'synced'));
+    } else {
+      setCloudSyncState('needs_auth');
+    }
+  }, [activeAccount, cloudConfigured]);
+
+  // Keep Service Worker portfolio context in sync for Periodic Background Sync
+  useEffect(() => {
+    void syncPortfolioToServiceWorker(portfolio);
+  }, [portfolio]);
 
   const activeAccountLabel = activeAccount
     ? activeAccount.displayName
@@ -302,6 +358,19 @@ export default function App() {
     }
   }, [investorAlerts, notificationPermission, readAlertIds]);
 
+  // 15-Minute Pre-Event Economic Calendar Notifications (0% AI Quota — High Impact & Portfolio)
+  useEffect(() => {
+    if (notificationPermission !== 'granted') return;
+    if (calendarEvents.length === 0) return;
+
+    const cleanup = schedulePreEventCalendarNotifications({
+      calendarEvents,
+      portfolio,
+      portfolioMap,
+    });
+    return cleanup;
+  }, [calendarEvents, portfolio, portfolioMap, notificationPermission]);
+
   const matchedCalendar14dCount = useMemo(() => {
     if (portfolio.length === 0) return 0;
     return calendarEvents.filter((ev) => {
@@ -344,7 +413,7 @@ export default function App() {
     return eSoon + xSoon;
   }, [earningsRecords, dividendRecords]);
 
-  // SINGLE BATCHED SYNC: Free Google News RSS + Yahoo Finance + 1 Gemini Call (Cached 6h)
+  // SINGLE BATCHED SYNC: ForexFactory UTC+7 + Google News RSS + Yahoo Finance + 1 Gemini Call (Cached 2h)
   const syncBatchedAllLive = useCallback(
     async (targetPortfolio: PortfolioAsset[], targetAccountId: string, silent = false) => {
       const reqId = ++batchedReqIdRef.current;
@@ -384,6 +453,7 @@ export default function App() {
         setLiveQuotes(data.quotes || {});
         setSyncSources(data.sources);
         setLastSyncedAt(nowTime);
+        lastSyncedEpochRef.current = Date.parse(data.syncedAt) || Date.now();
 
         saveCachedBatchedData(targetAccountId, {
           portfolioSignature: targetSig,
@@ -405,7 +475,7 @@ export default function App() {
           if (!silent) {
             setNotice({
               type: 'error',
-              message: `${data.aiWarning} (ดึงข่าวสด ${data.newsItems.length} รายการ และราคาหุ้น ${Object.keys(data.quotes || {}).length} ตัวสำเร็จ)`,
+              message: `${data.aiWarning} (ดึงปฏิทิน ${data.calendarEvents.length}, ข่าวสด ${data.newsItems.length}, ราคา ${Object.keys(data.quotes || {}).length} ตัวสำเร็จ)`,
             });
           }
         } else if (!silent) {
@@ -440,7 +510,7 @@ export default function App() {
     [syncBatchedAllLive]
   );
 
-  // Automatic 6-Hour Cached Batched Sync Lifecycle
+  // Automatic 2-Hour Cached Batched Sync Lifecycle
   const lastAutoSyncKeyRef = useRef<string>('');
   useEffect(() => {
     const syncKey = `${activeAccountId}::${portfolioSignature}`;
@@ -454,6 +524,7 @@ export default function App() {
 
     if (hasFreshCache) {
       lastAutoSyncKeyRef.current = syncKey;
+      lastSyncedEpochRef.current = Date.parse(cached.syncedAt) || Date.now();
       markServedFromCache();
       return;
     }
@@ -466,6 +537,129 @@ export default function App() {
 
     return () => window.clearTimeout(timer);
   }, [activeAccountId, portfolioSignature, syncBatchedAllLive]);
+
+  // 2-Hour Auto-Refresh Timer + visibilitychange & focus staleness check
+  useEffect(() => {
+    const refreshIfStale = () => {
+      if (isSyncingRef.current || isCoolingDownRef.current) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      if (document.visibilityState !== 'visible') return;
+
+      const acctId = activeAccountIdRef.current;
+      const curPort = portfolioRef.current;
+      const sig = buildPortfolioSignature(curPort.map((p) => p.symbol));
+      const cached = loadCachedBatchedData(acctId, sig);
+
+      const isFresh =
+        cached &&
+        isCacheFresh(cached.syncedAt, cached.syncedDateIso, BATCHED_CACHE_TTL_MS);
+      const elapsedMs = Date.now() - lastSyncedEpochRef.current;
+
+      if (!isFresh && elapsedMs >= BATCHED_CACHE_TTL_MS) {
+        void syncBatchedAllLive(curPort, acctId, true);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        refreshIfStale();
+      }
+    };
+
+    const handleWindowFocus = () => {
+      refreshIfStale();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+    const intervalId = window.setInterval(refreshIfStale, 5 * 60 * 1000);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+      window.clearInterval(intervalId);
+    };
+  }, [syncBatchedAllLive]);
+
+  // Helper: Auto-save latest portfolio changes to Upstash Redis when cloud session is active
+  const cloudSaveTimerRef = useRef<number | null>(null);
+  const activeAccountRef = useRef<LocalUserAccount | null>(activeAccount);
+  activeAccountRef.current = activeAccount;
+
+  const scheduleCloudPortfolioSave = useCallback(
+    (nextPortfolio: PortfolioAsset[]) => {
+      const acct = activeAccountRef.current;
+      if (!acct || !hasCloudSessionToken(acct.username)) return;
+
+      if (cloudSaveTimerRef.current !== null) {
+        window.clearTimeout(cloudSaveTimerRef.current);
+      }
+
+      setCloudSyncState('syncing');
+      cloudSaveTimerRef.current = window.setTimeout(() => {
+        cloudSaveTimerRef.current = null;
+        void saveCloudAccountData({
+          username: acct.username,
+          displayName: acct.displayName,
+          portfolio: nextPortfolio,
+          settings: {
+            notificationsEnabled: notificationPermission === 'granted',
+            preEventAlertMinutes: 15,
+          },
+        }).then((res) => {
+          if (res.ok) {
+            setCloudSyncState('synced');
+            setCloudLastSyncedAt(formatThaiTimeNow());
+          } else if (!res.cloudConfigured) {
+            setCloudConfigured(false);
+            setCloudSyncState('local_only');
+          } else if (res.authRequired) {
+            setCloudSyncState('needs_auth');
+          } else {
+            setCloudSyncState('error');
+          }
+        });
+      }, 450);
+    },
+    [notificationPermission]
+  );
+
+  const handlePullCloudLatest = useCallback(async () => {
+    const acct = activeAccountRef.current;
+    if (!acct) return;
+
+    setCloudSyncState('syncing');
+    const res = await pullCloudAccountData(acct.username);
+
+    if (res.ok) {
+      const { merged } = mergeCloudAndLocalPortfolios(res.user.portfolio, []);
+      savePortfolioForAccount(acct.id, merged);
+      setPortfolio(merged);
+      lastAutoSyncKeyRef.current = '';
+      setCloudSyncState('synced');
+      const nowLabel = formatThaiTimeNow();
+      setCloudLastSyncedAt(nowLabel);
+      setNotice({
+        type: 'success',
+        message: `ดึงข้อมูลพอร์ตล่าสุดจากคลาวด์สำเร็จ (${merged.length} สินทรัพย์ · ${nowLabel} น.)`,
+      });
+      return;
+    }
+
+    if (!res.cloudConfigured) {
+      setCloudConfigured(false);
+      setCloudSyncState('local_only');
+    } else if (res.authRequired) {
+      setCloudSyncState('needs_auth');
+    } else {
+      setCloudSyncState('error');
+    }
+
+    setNotice({
+      type: 'error',
+      message: res.error,
+    });
+  }, []);
 
   function handleAddAsset(assetInput: Omit<PortfolioAsset, 'id' | 'addedAt'>) {
     setPortfolio((prev) => {
@@ -481,6 +675,7 @@ export default function App() {
         ...prev,
       ];
       savePortfolioForAccount(activeAccountId, next);
+      scheduleCloudPortfolioSave(next);
       return next;
     });
     setSyncError(null);
@@ -490,6 +685,7 @@ export default function App() {
     setPortfolio((prev) => {
       const next = prev.filter((item) => item.id !== id);
       savePortfolioForAccount(activeAccountId, next);
+      scheduleCloudPortfolioSave(next);
       return next;
     });
     setSyncError(null);
@@ -501,6 +697,7 @@ export default function App() {
         item.id === id ? { ...item, averageCost, quantity } : item
       );
       savePortfolioForAccount(activeAccountId, next);
+      scheduleCloudPortfolioSave(next);
       return next;
     });
     setTrendTargetAsset((prev) =>
@@ -511,10 +708,26 @@ export default function App() {
   function handleAuthChange(
     nextAccounts: LocalUserAccount[],
     nextActiveId: string,
-    message?: string
+    message?: string,
+    options?: {
+      portfolioOverride?: PortfolioAsset[];
+      cloudSynced?: boolean;
+      cloudConfigured?: boolean;
+    }
   ) {
     setAccounts(nextAccounts);
     setActiveAccountId(nextActiveId);
+    if (options?.portfolioOverride) {
+      savePortfolioForAccount(nextActiveId, options.portfolioOverride);
+      setPortfolio(options.portfolioOverride);
+    }
+    if (typeof options?.cloudConfigured === 'boolean') {
+      setCloudConfigured(options.cloudConfigured);
+    }
+    if (options?.cloudSynced) {
+      setCloudSyncState('synced');
+      setCloudLastSyncedAt(formatThaiTimeNow());
+    }
     lastAutoSyncKeyRef.current = '';
     if (message) {
       setNotice({ type: 'success', message });
@@ -645,6 +858,7 @@ export default function App() {
           }
           const merged = Array.from(existingMap.values());
           savePortfolioForAccount(activeAccountId, merged);
+          scheduleCloudPortfolioSave(merged);
           return merged;
         });
 
@@ -717,9 +931,10 @@ export default function App() {
     const perm = await requestChromeNotificationPermission();
     setNotificationPermission(perm);
     if (perm === 'granted') {
+      void tryRegisterPeriodicSync();
       setNotice({
         type: 'success',
-        message: 'เปิดรับการแจ้งเตือนผ่าน Chrome เรียบร้อยแล้ว',
+        message: 'เปิดรับการแจ้งเตือนล่วงหน้า 15 นาทีและแจ้งเตือนข่าวเสี่ยงสูงเรียบร้อยแล้ว',
       });
       await sendTestChromeNotification(portfolio.map((p) => p.symbol));
     } else if (perm === 'denied') {
@@ -990,14 +1205,19 @@ export default function App() {
         </div>
       </nav>
 
-      {/* Unified Account, Settings, Quota Gauge, PWA Install & JSON Backup Modal */}
+      {/* Unified Account, Cloud Sync, Quota Gauge, PWA Install & JSON Backup Modal */}
       <AuthModal
         open={authModalOpen}
         onClose={() => setAuthModalOpen(false)}
         accounts={accounts}
         activeAccountId={activeAccountId}
+        currentPortfolio={portfolio}
         portfolioCount={portfolio.length}
         quota={quota}
+        cloudConfigured={cloudConfigured}
+        cloudSyncState={cloudSyncState}
+        cloudLastSyncedAt={cloudLastSyncedAt}
+        onPullCloudLatest={handlePullCloudLatest}
         onAuthChange={handleAuthChange}
         onExportJson={handleExportJson}
         onImportJsonFile={handleImportJsonFile}

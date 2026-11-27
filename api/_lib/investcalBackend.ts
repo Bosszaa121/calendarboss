@@ -17,6 +17,7 @@ import {
   parseValidIsoDate,
 } from '../../src/utils/geminiParsers.ts';
 import {
+  collectLiveEconomicCalendar,
   collectLivePublicRssNews,
   collectLiveYahooQuotes,
   fetchYahooHistoricalCandles,
@@ -237,20 +238,29 @@ async function generateJsonWithFallback(ai: GoogleGenAI, contents: string) {
       await acquireGeminiSlot();
       const config: {
         responseMimeType: string;
+        temperature: number;
+        maxOutputTokens: number;
         thinkingConfig?: { thinkingLevel: ThinkingLevel };
       } = {
         responseMimeType: 'application/json',
+        temperature: 0.2,
+        maxOutputTokens: 8192,
       };
 
       if (model.startsWith('gemini-4')) {
         config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
       }
 
-      const response = await ai.models.generateContent({
-        model,
-        contents,
-        config,
-      });
+      const response = await Promise.race([
+        ai.models.generateContent({
+          model,
+          contents,
+          config,
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Gemini request timeout (35s)')), 35_000)
+        ),
+      ]);
 
       activeServerModel = model;
       rateLimitedUntilMs.delete(model);
@@ -446,7 +456,8 @@ export async function handleBatchedSync(
       BATCHED_SERVER_CACHE_TTL_MS,
       force,
       async () => {
-        const [rssHeadlines, yahooQuotes] = await Promise.all([
+        const [realCalendarEvents, rssHeadlines, yahooQuotes] = await Promise.all([
+          collectLiveEconomicCalendar(false, force),
           collectLivePublicRssNews(portfolioEntries, false),
           collectLiveYahooQuotes(portfolioEntries, today, false),
         ]);
@@ -459,7 +470,8 @@ export async function handleBatchedSync(
               rssHeadlines,
               yahooQuotes,
               today,
-              'ยังไม่ได้ตั้งค่า GEMINI_API_KEY — แสดงข่าวสดจาก Google News RSS และราคา/ปันผลจริงจาก Yahoo Finance โดยตรง'
+              'ยังไม่ได้ตั้งค่า GEMINI_API_KEY — แสดงปฏิทินเศรษฐกิจเวลาไทยจริง ข่าวสด RSS และราคา/ปันผลจริงจาก Yahoo Finance โดยตรง',
+              realCalendarEvents
             ),
             aiCalled: false,
             rateLimited: false,
@@ -471,7 +483,8 @@ export async function handleBatchedSync(
             portfolioEntries,
             rssHeadlines,
             yahooQuotes,
-            today
+            today,
+            realCalendarEvents
           );
           const response = await generateJsonWithFallback(ai, prompt);
           return {
@@ -480,7 +493,8 @@ export async function handleBatchedSync(
               portfolioEntries,
               rssHeadlines,
               yahooQuotes,
-              today
+              today,
+              realCalendarEvents
             ),
             aiCalled: true,
             rateLimited: false,
@@ -496,7 +510,8 @@ export async function handleBatchedSync(
               rssHeadlines,
               yahooQuotes,
               today,
-              formatted.message
+              formatted.message,
+              realCalendarEvents
             ),
             aiCalled: false,
             rateLimited: formatted.rateLimited,

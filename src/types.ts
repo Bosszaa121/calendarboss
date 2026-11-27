@@ -78,10 +78,16 @@ export interface PortfolioAsset {
 
 export interface CalendarEvent {
   id: string;
-  /** ISO date string YYYY-MM-DD */
+  /** ISO date string YYYY-MM-DD in Asia/Bangkok (UTC+7) */
   date: string;
-  /** Time in Bangkok ICT (HH:mm) */
+  /** Time in Asia/Bangkok 24h format (e.g. "20:30 น.", "01:00 น.") */
   time: string;
+  /** Exact UTC ISO timestamp of the announcement for accurate 15-min pre-event notifications */
+  eventTimestampIso?: string;
+  /** Original English title from ForexFactory feed */
+  originalTitle?: string;
+  /** Feed source tag (e.g. "ForexFactory") */
+  sourceProvider?: string;
   countryCode: string;
   flag: string;
   currency: string;

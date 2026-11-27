@@ -13,6 +13,11 @@ import {
   parseJsonBody,
   resolveGeminiApiKey,
 } from './api/_lib/investcalBackend.ts';
+import {
+  applyAuthenticatedCorsAndPreflight,
+  extractBearerToken,
+  handleUserSync,
+} from './api/_lib/userSyncBackend.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,7 +44,7 @@ async function startServer() {
     res.status(status).json(payload);
   });
 
-  // 2. SINGLE BATCHED SYNC: Server-side Google News RSS + Yahoo Finance Quotes + 1 Gemini JSON Request
+  // 2. SINGLE BATCHED SYNC: ForexFactory UTC+7 Calendar + Google News RSS + Yahoo Finance + 1 Gemini JSON Request
   app.all('/api/batched-sync', async (req, res) => {
     if (applyCorsAndPreflight(req, res, ['POST', 'OPTIONS'])) return;
     const { status, payload } = await handleBatchedSync(
@@ -63,12 +68,22 @@ async function startServer() {
     res.status(status).json(payload);
   });
 
-  // 4. On-Demand AI Technical, Elliott Wave & Entry/TP/SL Analysis (1 Single Request, NO googleSearch)
+  // 4. On-Demand AI Technical & Fibonacci Plan (1 Single Request, NO googleSearch)
   app.all('/api/analyze-chart', async (req, res) => {
     if (applyCorsAndPreflight(req, res, ['POST', 'OPTIONS'])) return;
     const { status, payload } = await handleAnalyzeChart(
       parseJsonBody(req),
       resolveGeminiApiKey(req)
+    );
+    res.status(status).json(payload);
+  });
+
+  // 5. Cross-Device User Membership & Portfolio Cloud Sync via Upstash Redis REST API
+  app.all('/api/user-sync', async (req, res) => {
+    if (applyAuthenticatedCorsAndPreflight(req, res)) return;
+    const { status, payload } = await handleUserSync(
+      parseJsonBody(req),
+      extractBearerToken(req)
     );
     res.status(status).json(payload);
   });

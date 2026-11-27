@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
 import {
   CheckCircle2,
+  Cloud,
+  CloudOff,
   Download,
   LogIn,
   LogOut,
+  RefreshCw,
   ShieldCheck,
   Trash2,
   Upload,
@@ -11,15 +14,26 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { LocalUserAccount, QuotaSnapshot } from '../types';
+import { LocalUserAccount, PortfolioAsset, QuotaSnapshot } from '../types';
 import {
   authenticateLocalAccount,
   deleteLocalAccount,
   GUEST_ACCOUNT_ID,
   loadLocalAccounts,
+  loadPortfolioForAccount,
   registerLocalAccount,
   saveActiveAccountId,
+  upsertCloudAccountLocally,
 } from '../utils/localAuth';
+import {
+  clearCloudSessionToken,
+  CloudSyncState,
+  hasCloudSessionToken,
+  loginCloudAccount,
+  mergeCloudAndLocalPortfolios,
+  registerCloudAccount,
+  saveCloudAccountData,
+} from '../services/userSyncService';
 import { SidebarQuotaCard } from './ApiQuotaGauge';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -27,15 +41,25 @@ interface AuthModalProps {
   open: boolean;
   accounts: LocalUserAccount[];
   activeAccountId: string;
+  currentPortfolio: PortfolioAsset[];
   portfolioCount: number;
   quota: QuotaSnapshot;
+  cloudConfigured: boolean;
+  cloudSyncState: CloudSyncState;
+  cloudLastSyncedAt: string | null;
+  onPullCloudLatest: () => Promise<void>;
   onExportJson: () => void;
   onImportJsonFile: (file: File) => void;
   onClose: () => void;
   onAuthChange: (
     accounts: LocalUserAccount[],
     activeAccountId: string,
-    noticeMessage?: string
+    noticeMessage?: string,
+    options?: {
+      portfolioOverride?: PortfolioAsset[];
+      cloudSynced?: boolean;
+      cloudConfigured?: boolean;
+    }
   ) => void;
 }
 
@@ -45,8 +69,13 @@ export function AuthModal({
   open,
   accounts,
   activeAccountId,
+  currentPortfolio,
   portfolioCount,
   quota,
+  cloudConfigured,
+  cloudSyncState,
+  cloudLastSyncedAt,
+  onPullCloudLatest,
   onExportJson,
   onImportJsonFile,
   onClose,
@@ -58,10 +87,14 @@ export function AuthModal({
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [pulling, setPulling] = useState(false);
 
   if (!open) return null;
 
   const activeAccount = accounts.find((a) => a.id === activeAccountId) ?? null;
+  const hasActiveCloudToken = activeAccount
+    ? hasCloudSessionToken(activeAccount.username)
+    : false;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -69,43 +102,164 @@ export function AuthModal({
     setSubmitting(true);
     try {
       if (mode === 'register') {
-        const result = await registerLocalAccount({
+        const initialPortfolio =
+          activeAccountId === GUEST_ACCOUNT_ID ? currentPortfolio : [];
+
+        const cloudRes = await registerCloudAccount({
           username,
           displayName,
           password,
+          portfolio: initialPortfolio,
+          settings: { preEventAlertMinutes: 15 },
         });
-        if (!result.ok) {
-          setError(result.error);
+
+        if (cloudRes.ok) {
+          const localLinked = await upsertCloudAccountLocally({
+            username: cloudRes.user.username,
+            displayName: cloudRes.user.displayName,
+            password,
+            portfolio: cloudRes.user.portfolio,
+          });
+          onAuthChange(
+            localLinked.accounts,
+            localLinked.account.id,
+            `สมัครสมาชิกคลาวด์ "${cloudRes.user.displayName}" สำเร็จแล้ว (☁️ ซิงก์ข้ามอุปกรณ์อัตโนมัติ)`,
+            {
+              portfolioOverride: cloudRes.user.portfolio,
+              cloudSynced: true,
+              cloudConfigured: true,
+            }
+          );
+          setUsername('');
+          setDisplayName('');
+          setPassword('');
+          setMode('settings');
           return;
         }
-        onAuthChange(
-          result.accounts,
-          result.account.id,
-          `สมัครสมาชิก "${result.account.displayName}" สำเร็จแล้ว (พอร์ตส่วนตัวแยกเฉพาะบัญชีนี้)`
-        );
-        setUsername('');
-        setDisplayName('');
-        setPassword('');
-        setMode('settings');
+
+        // If Redis is not yet configured on server, gracefully fall back to local account
+        if (!cloudRes.cloudConfigured) {
+          const localRes = await registerLocalAccount({
+            username,
+            displayName,
+            password,
+          });
+          if (!localRes.ok) {
+            setError(localRes.error);
+            return;
+          }
+          onAuthChange(
+            localRes.accounts,
+            localRes.account.id,
+            `สมัครสมาชิก "${localRes.account.displayName}" สำเร็จ (โหมดเก็บในเครื่อง — ยังไม่ได้ตั้งค่า Upstash Redis)`,
+            { cloudSynced: false, cloudConfigured: false }
+          );
+          setUsername('');
+          setDisplayName('');
+          setPassword('');
+          setMode('settings');
+          return;
+        }
+
+        setError(cloudRes.error);
+        return;
       } else if (mode === 'login') {
-        const result = await authenticateLocalAccount({ username, password });
-        if (!result.ok) {
-          setError(result.error);
+        const cloudRes = await loginCloudAccount({ username, password });
+
+        if (cloudRes.ok) {
+          // Auto-merge local portfolio (Guest or cached local account portfolio) with Cloud portfolio
+          const existingLocalAccount = accounts.find(
+            (a) => a.username.toLowerCase() === cloudRes.user.username.toLowerCase()
+          );
+          const cachedAcctPortfolio = existingLocalAccount
+            ? loadPortfolioForAccount(existingLocalAccount.id)
+            : [];
+          const guestPortfolio =
+            activeAccountId === GUEST_ACCOUNT_ID ? currentPortfolio : [];
+
+          const localCandidates = [...cachedAcctPortfolio, ...guestPortfolio];
+          const { merged, addedFromLocal, updatedFromLocal } = mergeCloudAndLocalPortfolios(
+            cloudRes.user.portfolio,
+            localCandidates
+          );
+
+          if (addedFromLocal > 0 || updatedFromLocal > 0) {
+            await saveCloudAccountData({
+              username: cloudRes.user.username,
+              displayName: cloudRes.user.displayName,
+              portfolio: merged,
+            });
+          }
+
+          const localLinked = await upsertCloudAccountLocally({
+            username: cloudRes.user.username,
+            displayName: cloudRes.user.displayName,
+            password,
+            portfolio: merged,
+          });
+
+          const mergeNote =
+            addedFromLocal > 0
+              ? ` (รวมพอร์ตในเครื่องเพิ่ม ${addedFromLocal} ตัวและซิงก์ขึ้นคลาวด์แล้ว)`
+              : ` (ดึงข้อมูลพอร์ต ${merged.length} ตัวจากคลาวด์แล้ว)`;
+
+          onAuthChange(
+            localLinked.accounts,
+            localLinked.account.id,
+            `เข้าสู่ระบบ "${cloudRes.user.displayName}" สำเร็จ${mergeNote}`,
+            {
+              portfolioOverride: merged,
+              cloudSynced: true,
+              cloudConfigured: true,
+            }
+          );
+          setUsername('');
+          setPassword('');
+          setMode('settings');
           return;
         }
-        onAuthChange(
-          loadLocalAccounts(),
-          result.account.id,
-          `เข้าสู่ระบบบัญชี "${result.account.displayName}" เรียบร้อยแล้ว`
-        );
-        setUsername('');
-        setPassword('');
-        setMode('settings');
+
+        // Fallback to local auth ONLY if Redis is not configured on the server
+        if (!cloudRes.cloudConfigured) {
+          const localRes = await authenticateLocalAccount({ username, password });
+          if (!localRes.ok) {
+            setError(localRes.error);
+            return;
+          }
+          onAuthChange(
+            loadLocalAccounts(),
+            localRes.account.id,
+            `เข้าสู่ระบบบัญชี "${localRes.account.displayName}" เรียบร้อยแล้ว (โหมดในเครื่อง)`,
+            { cloudSynced: false, cloudConfigured: false }
+          );
+          setUsername('');
+          setPassword('');
+          setMode('settings');
+          return;
+        }
+
+        setError(cloudRes.error);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'ไม่สามารถดำเนินการได้');
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleManualPull() {
+    if (!activeAccount) return;
+    if (!hasActiveCloudToken) {
+      setUsername(activeAccount.username);
+      setError('กรุณากรอกรหัสผ่านเพื่อยืนยันตัวตนและดึงข้อมูลล่าสุดจากคลาวด์');
+      setMode('login');
+      return;
+    }
+    setPulling(true);
+    try {
+      await onPullCloudLatest();
+    } finally {
+      setPulling(false);
     }
   }
 
@@ -120,12 +274,18 @@ export function AuthModal({
   }
 
   function handleLogoutToGuest() {
+    if (activeAccount) {
+      clearCloudSessionToken(activeAccount.username);
+    }
     saveActiveAccountId(GUEST_ACCOUNT_ID);
     onAuthChange(accounts, GUEST_ACCOUNT_ID, 'ออกจากระบบแล้ว (กลับมาใช้โหมดผู้เยี่ยมชม)');
   }
 
   function handleDeleteAccount(id: string) {
     const target = accounts.find((a) => a.id === id);
+    if (target) {
+      clearCloudSessionToken(target.username);
+    }
     const nextAccounts = deleteLocalAccount(id);
     const nextActiveId = activeAccountId === id ? GUEST_ACCOUNT_ID : activeAccountId;
     onAuthChange(
@@ -234,15 +394,91 @@ export function AuthModal({
         <div className="p-4 pt-2 space-y-4 overflow-y-auto flex-1">
           {mode === 'settings' ? (
             <>
-              {/* 1. Full AI Quota Gauge */}
+              {/* 1. Cross-Device Cloud Sync Status & Manual Pull Card */}
+              <div className="bg-[#10151E] border border-[#1E2634] rounded-xl p-3.5 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold text-slate-200 inline-flex items-center gap-1.5">
+                    {cloudConfigured ? (
+                      <Cloud className="w-4 h-4 text-sky-400 shrink-0" />
+                    ) : (
+                      <CloudOff className="w-4 h-4 text-slate-500 shrink-0" />
+                    )}
+                    <span>ซิงก์พอร์ตข้ามอุปกรณ์ (Cloud Sync)</span>
+                  </span>
+                  {cloudLastSyncedAt && cloudSyncState === 'synced' && (
+                    <span className="text-[11px] font-mono text-slate-400 shrink-0">
+                      {cloudLastSyncedAt} น.
+                    </span>
+                  )}
+                </div>
+
+                {/* Status Badge */}
+                {activeAccount ? (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div
+                      className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 ${
+                        cloudSyncState === 'synced' && hasActiveCloudToken
+                          ? 'bg-emerald-500/12 border-emerald-500/35 text-emerald-300'
+                          : cloudSyncState === 'syncing'
+                          ? 'bg-amber-500/12 border-amber-500/35 text-amber-200'
+                          : !cloudConfigured || cloudSyncState === 'local_only'
+                          ? 'bg-slate-800/70 border-slate-700 text-slate-300'
+                          : 'bg-sky-500/12 border-sky-500/35 text-sky-200'
+                      }`}
+                    >
+                      <span>
+                        {cloudSyncState === 'syncing'
+                          ? '☁️ กำลังซิงก์ข้อมูลคลาวด์...'
+                          : cloudSyncState === 'synced' && hasActiveCloudToken
+                          ? '☁️ ซิงก์ข้อมูลคลาวด์แล้ว'
+                          : !cloudConfigured || cloudSyncState === 'local_only'
+                          ? '💾 โหมดเก็บในเครื่อง (รอเชื่อม Upstash Redis)'
+                          : '☁️ เข้าสู่ระบบอีกครั้งเพื่อเชื่อมคลาวด์'}
+                      </span>
+                    </div>
+
+                    {cloudConfigured && (
+                      <button
+                        type="button"
+                        onClick={() => void handleManualPull()}
+                        disabled={pulling || cloudSyncState === 'syncing'}
+                        className="min-h-[38px] px-3 rounded-xl bg-[#090C11] border border-[#253042] hover:border-amber-500/50 disabled:opacity-50 text-xs font-semibold text-amber-300 inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer transition-colors"
+                      >
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 ${
+                            pulling || cloudSyncState === 'syncing' ? 'animate-spin' : ''
+                          }`}
+                        />
+                        <span>🔄 ดึงข้อมูลล่าสุด</span>
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
+                    <span>เข้าสู่ระบบเพื่อซิงก์พอร์ตและราคาทุนระหว่างมือถือกับคอมพิวเตอร์</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMode('login');
+                        setError(null);
+                      }}
+                      className="min-h-[34px] px-3 rounded-lg bg-amber-500/15 border border-amber-500/35 text-amber-300 font-semibold shrink-0 cursor-pointer"
+                    >
+                      เข้าสู่ระบบ
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* 2. Full AI Quota Gauge */}
               <div className="space-y-2">
                 <div className="text-xs font-semibold text-slate-300">
-                  หลอดแสดงโควตา AI (Free Tier Protection)
+                  หลอดแสดงโควตา AI (Free Tier Protection · แคช 2 ชม.)
                 </div>
                 <SidebarQuotaCard quota={quota} />
               </div>
 
-              {/* 2. PWA Install & JSON Backup Utilities */}
+              {/* 3. PWA Install & JSON Backup Utilities */}
               <div className="bg-[#10151E] border border-[#1E2634] rounded-xl p-3.5 space-y-3">
                 <div className="text-xs font-semibold text-slate-300">
                   ติดตั้งแอป &amp; สำรองพอร์ต (JSON)
@@ -280,7 +516,7 @@ export function AuthModal({
                 </div>
               </div>
 
-              {/* 3. Active Account & Local Account Switcher */}
+              {/* 4. Active Account & Local Account Switcher */}
               <div className="bg-[#10151E] border border-[#1E2634] rounded-xl p-3.5 space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-xs font-semibold text-slate-300 inline-flex items-center gap-1.5">
@@ -355,6 +591,14 @@ export function AuthModal({
             </>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-3">
+              <div className="px-3 py-2 rounded-xl bg-[#10151E] border border-[#1E2634] text-[11px] text-slate-400 leading-relaxed">
+                {cloudConfigured
+                  ? mode === 'register'
+                    ? '☁️ บัญชีใหม่จะบันทึกบนคลาวด์ (Upstash Redis) ทันที สามารถใช้ Username/Password เดิมเข้าสู่ระบบได้ทั้งมือถือและคอมพิวเตอร์'
+                    : '☁️ เมื่อเข้าสู่ระบบ พอร์ตและราคาทุนเฉลี่ยจากคลาวด์จะถูกดึงและรวมกับหุ้นที่มีอยู่ในเครื่องนี้ให้อัตโนมัติ'
+                  : '💾 ขณะนี้เซิร์ฟเวอร์ยังไม่ได้เชื่อมต่อ Upstash Redis ระบบจะเก็บบัญชีและพอร์ตไว้ในเครื่องนี้ก่อน'}
+              </div>
+
               <div>
                 <label className="block text-xs text-slate-300 mb-1.5">
                   ชื่อผู้ใช้ (Username)
@@ -413,7 +657,11 @@ export function AuthModal({
                 {submitting
                   ? 'กำลังดำเนินการ...'
                   : mode === 'register'
-                  ? 'สร้างบัญชีส่วนตัวในเครื่อง'
+                  ? cloudConfigured
+                    ? 'สมัครสมาชิก & ซิงก์คลาวด์'
+                    : 'สร้างบัญชีส่วนตัวในเครื่อง'
+                  : cloudConfigured
+                  ? 'เข้าสู่ระบบ & ดึงพอร์ตจากคลาวด์'
                   : 'เข้าสู่ระบบ'}
               </button>
             </form>

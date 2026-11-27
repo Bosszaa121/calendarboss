@@ -11,11 +11,11 @@ import {
   SyncSource,
 } from '../types';
 
-const BATCHED_CACHE_PREFIX = 'investcal_batched_live_v5_';
+const BATCHED_CACHE_PREFIX = 'investcal_batched_live_v6_';
 const CHART_AI_CACHE_PREFIX = 'investcal_trend_fib_ai_v2_';
 
-/** 6-hour cache TTL to stay 100% within Gemini Free Tier quotas */
-export const BATCHED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+/** 2-hour (120-min) cache TTL for fresher real-time market & economic calendar sync while staying Free Tier safe */
+export const BATCHED_CACHE_TTL_MS = 2 * 60 * 60 * 1000;
 
 /** 4-hour cache TTL for On-Demand Concise AI Trend & Fibonacci Buy/Sell Plan */
 export const CHART_AI_CACHE_TTL_MS = 4 * 60 * 60 * 1000;
@@ -36,6 +36,20 @@ export interface CachedBatchedBundle {
 }
 
 export function getLocalTodayIso(): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Bangkok',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch {
+    // Fallback to local clock
+  }
   const now = new Date();
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, '0');

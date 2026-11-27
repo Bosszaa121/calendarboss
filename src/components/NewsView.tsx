@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -29,6 +29,7 @@ import {
   analyzePortfolioImpacts,
   isAssetTagMatched,
 } from '../utils/portfolioMatcher';
+import { formatThaiNewsTimestamp } from '../utils/thaiTime';
 import {
   AssetTickerTag,
   PortfolioImpactMatrix,
@@ -155,6 +156,12 @@ export function NewsView({
   const [platformFilter, setPlatformFilter] = useState<'ALL' | SocialPlatform>('ALL');
   const [socialSentimentFilter, setSocialSentimentFilter] = useState<'ALL' | SocialSentiment>('ALL');
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   function toggleExpand(id: string) {
     setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -184,25 +191,31 @@ export function NewsView({
 
   const filteredNews = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return newsItems.filter((item) => {
-      if (sentimentFilter !== 'ALL' && item.sentiment !== sentimentFilter) return false;
-      if (countryFilter !== 'ALL' && (item.countryCode || '').toUpperCase() !== countryFilter) {
-        return false;
-      }
-      const impacts = newsImpactsMap.get(item.id) ?? [];
-      if (onlyPortfolio && impacts.length === 0) return false;
-      if (q) {
-        const hitHeadline = item.headline.toLowerCase().includes(q);
-        const hitSummary = item.impactSummary.toLowerCase().includes(q);
-        const hitSource = item.source.toLowerCase().includes(q);
-        const hitAssets = item.relatedAssets.some((a) => a.toLowerCase().includes(q));
-        const hitImpacts = impacts.some(
-          (i) => i.symbol.toLowerCase().includes(q) || i.reasonTh.toLowerCase().includes(q)
-        );
-        return hitHeadline || hitSummary || hitSource || hitAssets || hitImpacts;
-      }
-      return true;
-    });
+    return newsItems
+      .filter((item) => {
+        if (sentimentFilter !== 'ALL' && item.sentiment !== sentimentFilter) return false;
+        if (countryFilter !== 'ALL' && (item.countryCode || '').toUpperCase() !== countryFilter) {
+          return false;
+        }
+        const impacts = newsImpactsMap.get(item.id) ?? [];
+        if (onlyPortfolio && impacts.length === 0) return false;
+        if (q) {
+          const hitHeadline = item.headline.toLowerCase().includes(q);
+          const hitSummary = item.impactSummary.toLowerCase().includes(q);
+          const hitSource = item.source.toLowerCase().includes(q);
+          const hitAssets = item.relatedAssets.some((a) => a.toLowerCase().includes(q));
+          const hitImpacts = impacts.some(
+            (i) => i.symbol.toLowerCase().includes(q) || i.reasonTh.toLowerCase().includes(q)
+          );
+          return hitHeadline || hitSummary || hitSource || hitAssets || hitImpacts;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        const aMs = Date.parse(a.publishedAt || '') || 0;
+        const bMs = Date.parse(b.publishedAt || '') || 0;
+        return bMs - aMs;
+      });
   }, [newsItems, sentimentFilter, countryFilter, onlyPortfolio, newsImpactsMap, searchQuery]);
 
   const filteredSocial = useMemo(() => {
@@ -482,10 +495,13 @@ export function NewsView({
                       directCount > 0 ? 'border-amber-500/35' : 'border-[#1E2634]'
                     }`}
                   >
-                    {/* Element 1: Flag + Source/Time + Sentiment */}
+                    {/* Element 1: Flag + Source + Live Bangkok Relative & 24h Time + Sentiment */}
                     <div className="flex items-center justify-between gap-2 text-xs">
                       <span className="text-slate-400 truncate">
-                        {item.countryFlag || '🌐'} {item.source} · {item.timeLabel}
+                        {item.countryFlag || '🌐'} {item.source} ·{' '}
+                        {item.publishedAt
+                          ? formatThaiNewsTimestamp(item.publishedAt, nowMs).timeLabel
+                          : item.timeLabel}
                       </span>
                       <SentimentIndicator sentiment={item.sentiment} />
                     </div>

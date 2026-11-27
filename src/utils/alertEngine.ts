@@ -13,6 +13,10 @@ import {
   formatThaiShortDate,
   getDayDiffFromToday,
 } from './portfolioMatcher';
+import { ensureThaiClockSuffix, parseBangkokEventTimestampMs } from './thaiTime';
+
+const PRE_EVENT_NOTIFIED_STORAGE_KEY = 'investcal_notified_preevent_ids_v1';
+const PRE_EVENT_LEAD_MS = 15 * 60 * 1000; // 15 minutes before real Bangkok announcement time
 
 export type BrowserNotificationPermission = 'granted' | 'denied' | 'default' | 'unsupported';
 
@@ -247,7 +251,13 @@ export function buildInvestorAlerts(params: {
       impacts.length > 0
         ? impacts.slice(0, 5).map((i) => i.symbol)
         : ev.relatedAssets.slice(0, 4);
-    const whenText = diff === 0 ? `วันนี้ เวลา ${ev.time} น.` : diff === 1 ? `พรุ่งนี้ เวลา ${ev.time} น.` : formatThaiShortDate(ev.date);
+    const clockText = ensureThaiClockSuffix(ev.time);
+    const whenText =
+      diff === 0
+        ? `วันนี้ เวลา ${clockText}`
+        : diff === 1
+        ? `พรุ่งนี้ เวลา ${clockText}`
+        : formatThaiShortDate(ev.date);
 
     alerts.push({
       id: `macro-${ev.id}`,
@@ -321,7 +331,7 @@ export function buildInvestorAlerts(params: {
         category: 'earnings',
         severity: 'high',
         title: `📊 ใกล้ประกาศงบ (${dayLabel}): ${ev.title}`,
-        body: `${formatThaiShortDate(ev.date)} เวลา ${ev.time} น. · กระทบ ${impacts.map((i) => i.symbol).join(', ')}`,
+        body: `${formatThaiShortDate(ev.date)} เวลา ${ensureThaiClockSuffix(ev.time)} · กระทบ ${impacts.map((i) => i.symbol).join(', ')}`,
         symbols: impacts.map((i) => i.symbol),
         targetTab: 'earnings',
         badgeLabel: `งบใน ${dayLabel}`,
@@ -401,3 +411,166 @@ export function buildInvestorAlerts(params: {
 
   return alerts.sort((a, b) => severityRank[b.severity] - severityRank[a.severity]);
 }
+
+// ============================================================================
+// 15-Minute Pre-Event Economic Calendar Notifications (0% AI Quota)
+// Fires strictly for High Impact OR Portfolio-impacting economic events
+// ============================================================================
+
+function loadNotifiedPreEventMap(): Record<string, number> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(PRE_EVENT_NOTIFIED_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const nowMs = Date.now();
+    const cleaned: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === 'number' && nowMs - v < 48 * 3600 * 1000) {
+        cleaned[k] = v;
+      }
+    }
+    return cleaned;
+  } catch {
+    return {};
+  }
+}
+
+function markPreEventNotified(dedupKey: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const map = loadNotifiedPreEventMap();
+    map[dedupKey] = Date.now();
+    window.localStorage.setItem(PRE_EVENT_NOTIFIED_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore quota errors
+  }
+}
+
+function buildPreEventDedupKey(ev: CalendarEvent): string {
+  const titleSlug = (ev.originalTitle || ev.title).toLowerCase().slice(0, 40);
+  return `pre15::${ev.date}::${ev.time}::${ev.currency}::${titleSlug}`;
+}
+
+export function schedulePreEventCalendarNotifications(params: {
+  calendarEvents: CalendarEvent[];
+  portfolio: PortfolioAsset[];
+  portfolioMap: Map<string, string>;
+}): () => void {
+  if (typeof window === 'undefined' || !('Notification' in window)) {
+    return () => {};
+  }
+  if (Notification.permission !== 'granted') {
+    return () => {};
+  }
+
+  const { calendarEvents, portfolio, portfolioMap } = params;
+  const timers: number[] = [];
+
+  const checkAndTrigger = () => {
+    if (Notification.permission !== 'granted') return;
+    const nowMs = Date.now();
+    const notified = loadNotifiedPreEventMap();
+
+    for (const ev of calendarEvents) {
+      if (ev.category !== 'economic') continue;
+      const eventMs = parseBangkokEventTimestampMs(ev.date, ev.time, ev.eventTimestampIso);
+      if (!eventMs) continue;
+
+      const msUntil = eventMs - nowMs;
+      // Ignore already passed events or events > 15 min away
+      if (msUntil <= 0 || msUntil > PRE_EVENT_LEAD_MS) continue;
+
+      const impacts =
+        portfolio.length > 0
+          ? analyzePortfolioImpacts(
+              {
+                title: ev.title,
+                description: ev.descriptionTh,
+                currency: ev.currency,
+                category: ev.category,
+                relatedAssets: ev.relatedAssets,
+                macroTags: ev.macroTags,
+                aiImpacts: ev.aiImpacts,
+              },
+              portfolio,
+              portfolioMap
+            )
+          : [];
+
+      const qualifies = ev.impact >= 3 || impacts.length > 0;
+      if (!qualifies) continue;
+
+      const dedupKey = buildPreEventDedupKey(ev);
+      if (notified[dedupKey]) continue;
+
+      markPreEventNotified(dedupKey);
+      notified[dedupKey] = nowMs;
+
+      const minsLeft = Math.max(1, Math.round(msUntil / 60_000));
+      const matchedSyms = impacts.slice(0, 4).map((i) => i.symbol);
+      const clockText = ensureThaiClockSuffix(ev.time);
+
+      void fireChromeNotification({
+        title: `⏰ อีก ${minsLeft} นาที: ${ev.flag} ${ev.title}`,
+        body: `ประกาศเวลาไทย ${clockText} (${ev.currency}) · คาดการณ์ ${ev.forecast} (ครั้งก่อน ${ev.previous})${
+          matchedSyms.length > 0 ? ` · กระทบ ${matchedSyms.join(', ')}` : ''
+        }`,
+        tag: dedupKey,
+      });
+    }
+  };
+
+  // 1. Immediate check for events starting within the next 15 minutes
+  checkAndTrigger();
+
+  // 2. Schedule exact timers for upcoming qualifying events within the next 12 hours
+  const nowMs = Date.now();
+  const notified = loadNotifiedPreEventMap();
+  const twelveHoursMs = 12 * 60 * 60 * 1000;
+
+  for (const ev of calendarEvents) {
+    if (ev.category !== 'economic') continue;
+    const eventMs = parseBangkokEventTimestampMs(ev.date, ev.time, ev.eventTimestampIso);
+    if (!eventMs) continue;
+
+    const triggerAtMs = eventMs - PRE_EVENT_LEAD_MS;
+    const delayMs = triggerAtMs - nowMs;
+    if (delayMs <= 0 || delayMs > twelveHoursMs) continue;
+
+    const impacts =
+      portfolio.length > 0
+        ? analyzePortfolioImpacts(
+            {
+              title: ev.title,
+              description: ev.descriptionTh,
+              currency: ev.currency,
+              category: ev.category,
+              relatedAssets: ev.relatedAssets,
+              macroTags: ev.macroTags,
+              aiImpacts: ev.aiImpacts,
+            },
+            portfolio,
+            portfolioMap
+          )
+        : [];
+
+    if (ev.impact < 3 && impacts.length === 0) continue;
+    if (notified[buildPreEventDedupKey(ev)]) continue;
+
+    const timerId = window.setTimeout(checkAndTrigger, delayMs + 500);
+    timers.push(timerId);
+  }
+
+  // 3. Lightweight 60-second sweep fallback (survives laptop sleep/wake)
+  const intervalId = window.setInterval(checkAndTrigger, 60_000);
+
+  return () => {
+    for (const id of timers) {
+      window.clearTimeout(id);
+    }
+    window.clearInterval(intervalId);
+  };
+}
+

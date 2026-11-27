@@ -1,6 +1,7 @@
 import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
+import { registerInvestCalServiceWorker } from './utils/pwaSync.ts';
 import './index.css';
 
 createRoot(document.getElementById('root')!).render(
@@ -11,8 +12,6 @@ createRoot(document.getElementById('root')!).render(
 
 if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {
-      // Ignore SW registration failure in restricted preview frames
-    });
+    void registerInvestCalServiceWorker();
   });
 }

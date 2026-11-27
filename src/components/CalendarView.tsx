@@ -23,6 +23,7 @@ import {
   formatThaiShortDate,
   matchesDateTab,
 } from '../utils/portfolioMatcher';
+import { ensureThaiClockSuffix } from '../utils/thaiTime';
 import {
   AssetDirectionForecastList,
   ImpactRating,
@@ -61,6 +62,8 @@ const COUNTRY_FILTER_OPTIONS: Array<{ code: string; flag: string; label: string 
   { code: 'EU', flag: '🇪🇺', label: 'ยุโรป' },
   { code: 'JP', flag: '🇯🇵', label: 'ญี่ปุ่น' },
   { code: 'GB', flag: '🇬🇧', label: 'อังกฤษ' },
+  { code: 'AU', flag: '🇦🇺', label: 'ออสเตรเลีย' },
+  { code: 'CA', flag: '🇨🇦', label: 'แคนาดา' },
 ];
 
 const EVENT_CATEGORY_LABELS: Record<EventCategory, string> = {
@@ -149,7 +152,12 @@ export function CalendarView({
         }
         return true;
       })
-      .sort((a, b) => a.date.localeCompare(b.date) || a.time.localeCompare(b.time));
+      .sort((a, b) => {
+        const aMs = a.eventTimestampIso ? Date.parse(a.eventTimestampIso) : 0;
+        const bMs = b.eventTimestampIso ? Date.parse(b.eventTimestampIso) : 0;
+        if (aMs && bMs && aMs !== bMs) return aMs - bMs;
+        return a.date.localeCompare(b.date) || a.time.localeCompare(b.time);
+      });
   }, [
     events,
     dateTab,
@@ -181,6 +189,11 @@ export function CalendarView({
     <div className="space-y-3">
       {/* Single-Row Horizontal Scrollable Filter Controls */}
       <section className="bg-[#10151E] border border-[#1E2634] rounded-2xl p-3.5 space-y-2.5">
+        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-400">
+          <span className="font-medium text-slate-300">ปฏิทินเศรษฐกิจจริง</span>
+          <span className="font-mono text-amber-300/90">เวลาไทย (UTC+7 · 24 ชม.)</span>
+        </div>
+
         {/* Row 1: Date Tabs (single row horizontal scroll) */}
         <div
           role="tablist"
@@ -379,19 +392,22 @@ export function CalendarView({
                     : 'border-[#1E2634]'
                 }`}
               >
-                {/* Element 1: Flag + Date/Time + Impact */}
+                {/* Element 1: Flag + Thai Time (UTC+7) + Date + Currency + Impact */}
                 <div className="flex items-center justify-between gap-2 text-xs">
                   <div className="flex items-center gap-1.5 min-w-0 text-slate-300">
                     <span className="shrink-0">{ev.flag}</span>
-                    <span className="font-mono tabular-nums font-semibold text-slate-100 shrink-0">
-                      {ev.time}
+                    <span className="font-mono tabular-nums font-semibold text-amber-300 shrink-0">
+                      {ensureThaiClockSuffix(ev.time)}
                     </span>
                     <span className="text-slate-500">·</span>
                     <span className="text-slate-400 shrink-0">
                       {formatThaiShortDate(ev.date)}
                     </span>
                     <span className="text-slate-500">·</span>
-                    <span className="truncate">{ev.countryNameTh}</span>
+                    <span className="font-mono text-[11px] text-slate-300 shrink-0">
+                      {ev.currency}
+                    </span>
+                    <span className="truncate text-slate-400">{ev.countryNameTh}</span>
                   </div>
                   <ImpactRating level={ev.impact} showLabel={false} />
                 </div>
