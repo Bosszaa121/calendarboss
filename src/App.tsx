@@ -470,19 +470,29 @@ export default function App() {
           syncedTimeLabel: nowTime,
         });
 
-        if (data.aiWarning) {
-          setSyncError(data.aiWarning);
+        const warningText = (data.aiWarning || '').trim();
+        const isRawJsonWarning = /json|position\s+\d+|unexpected\s+token|expected\s+double-quoted/i.test(
+          warningText
+        );
+        const hasLivePayload =
+          data.calendarEvents.length > 0 || data.newsItems.length > 0;
+
+        if (warningText && !(isRawJsonWarning && hasLivePayload)) {
+          setSyncError(warningText);
           if (!silent) {
             setNotice({
               type: 'error',
-              message: `${data.aiWarning} (ดึงปฏิทิน ${data.calendarEvents.length}, ข่าวสด ${data.newsItems.length}, ราคา ${Object.keys(data.quotes || {}).length} ตัวสำเร็จ)`,
+              message: `${warningText} (ดึงปฏิทิน ${data.calendarEvents.length}, ข่าวสด ${data.newsItems.length}, ราคา ${Object.keys(data.quotes || {}).length} ตัวสำเร็จ)`,
             });
           }
-        } else if (!silent) {
-          setNotice({
-            type: 'success',
-            message: `อัปเดตสำเร็จ ${nowTime} น. — ปฏิทิน ${data.calendarEvents.length}, ข่าว ${data.newsItems.length}, ราคา ${Object.keys(data.quotes || {}).length} ตัว`,
-          });
+        } else {
+          setSyncError(null);
+          if (!silent) {
+            setNotice({
+              type: 'success',
+              message: `อัปเดตสำเร็จ ${nowTime} น. — ปฏิทิน ${data.calendarEvents.length}, ข่าว ${data.newsItems.length}, ราคา ${Object.keys(data.quotes || {}).length} ตัว`,
+            });
+          }
         }
       } catch (err) {
         if (reqId !== batchedReqIdRef.current) return;

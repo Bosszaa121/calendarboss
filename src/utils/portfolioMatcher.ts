@@ -609,10 +609,10 @@ export function matchesDateTab(isoDate: string, tab: DateTabKey): boolean {
       return diff === 0;
     case 'tomorrow':
       return diff === 1;
-    case 'this_week':
-      return diff >= 0 && diff <= 6;
-    case 'next_week':
-      return diff >= 7 && diff <= 14;
+    case 'next_7_days':
+      return diff >= 0 && diff <= 7;
+    case 'all_14_days':
+      return diff >= -2 && diff <= 14;
     default:
       return true;
   }

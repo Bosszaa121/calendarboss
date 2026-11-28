@@ -11,7 +11,7 @@ import {
   SyncSource,
 } from '../types';
 
-const BATCHED_CACHE_PREFIX = 'investcal_batched_live_v6_';
+const BATCHED_CACHE_PREFIX = 'investcal_batched_live_v7_';
 const CHART_AI_CACHE_PREFIX = 'investcal_trend_fib_ai_v2_';
 
 /** 2-hour (120-min) cache TTL for fresher real-time market & economic calendar sync while staying Free Tier safe */

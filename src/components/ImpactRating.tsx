@@ -4,6 +4,7 @@ import {
   AssetDirection,
   AssetDirectionForecast,
   ImpactLevel,
+  MacroImpactItem,
   PortfolioImpactDetail,
   Sentiment,
 } from '../types';
@@ -331,4 +332,47 @@ export function AssetDirectionForecastList({
     </div>
   );
 }
+
+export function MacroImpactMatrix({
+  impacts,
+}: {
+  impacts?: MacroImpactItem[];
+}) {
+  if (!impacts || impacts.length === 0) return null;
+
+  return (
+    <div className="rounded-xl bg-[#090C11] border border-[#1B2331] p-3 space-y-2">
+      <div className="text-[11px] font-semibold text-slate-300">
+        ผลกระทบมหภาค (ค่าเงิน · โลหะมีค่า · คริปโต · ดัชนี)
+      </div>
+      <div className="space-y-1.5">
+        {impacts.slice(0, 6).map((item, idx) => {
+          const cfg = DIRECTION_STYLE[item.direction] || DIRECTION_STYLE.neutral;
+          return (
+            <div
+              key={`${item.asset}-${idx}`}
+              className="flex items-start justify-between gap-2 text-xs leading-snug"
+            >
+              <div className="flex items-center gap-1.5 shrink-0">
+                <span className="font-mono text-[11px] font-semibold text-slate-200 px-1.5 py-0.5 rounded bg-[#141B26] border border-[#222D40]">
+                  {item.asset}
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded border ${cfg.chipCls}`}
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} aria-hidden="true" />
+                  <span>{cfg.label}</span>
+                </span>
+              </div>
+              <span className="text-[11px] text-slate-300 text-right leading-relaxed">
+                {item.noteTh}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 

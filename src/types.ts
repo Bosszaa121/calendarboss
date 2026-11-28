@@ -10,11 +10,21 @@ export type NavTab = 'dashboard' | 'portfolio' | 'calendar' | 'earnings' | 'news
 
 export type NewsSubTab = 'global' | 'social';
 
-export type DateTabKey = 'yesterday' | 'today' | 'tomorrow' | 'this_week' | 'next_week';
+export type DateTabKey = 'yesterday' | 'today' | 'tomorrow' | 'next_7_days' | 'all_14_days';
 
 export type ImpactLevel = 1 | 2 | 3;
 
 export type EventCategory = 'economic' | 'earnings' | 'dividend';
+
+export type CalendarEventKind = 'indicator' | 'holiday' | 'meeting' | 'speech' | 'election';
+
+export type RegionFilterKey = 'ALL' | 'US' | 'ASIA' | 'TH' | 'EUROPE' | 'ANZ';
+
+export interface MacroImpactItem {
+  asset: string;
+  direction: AssetDirection;
+  noteTh: string;
+}
 
 export type Sentiment = 'bullish' | 'bearish' | 'neutral';
 
@@ -84,10 +94,14 @@ export interface CalendarEvent {
   time: string;
   /** Exact UTC ISO timestamp of the announcement for accurate 15-min pre-event notifications */
   eventTimestampIso?: string;
-  /** Original English title from ForexFactory feed */
+  /** Original English title from BiQuote / ForexFactory feed */
   originalTitle?: string;
-  /** Feed source tag (e.g. "ForexFactory") */
+  /** Feed source tag (e.g. "BiQuote", "ForexFactory", "BiQuote+FF") */
   sourceProvider?: string;
+  /** Fine-grained event classification so Holidays/Meetings/Speeches/Elections are never dropped */
+  eventKind?: CalendarEventKind;
+  /** True when the event has no exact clock time (Bank Holiday / All-Day Meeting / Tentative) */
+  isAllDay?: boolean;
   countryCode: string;
   flag: string;
   currency: string;
@@ -104,6 +118,7 @@ export interface CalendarEvent {
   macroTags: string[];
   descriptionTh: string;
   aiImpacts?: PortfolioImpactDetail[];
+  macroImpacts?: MacroImpactItem[];
   assetForecasts?: AssetDirectionForecast[];
   isLiveSynced?: boolean;
 }
@@ -120,8 +135,11 @@ export interface NewsItem {
   relatedAssets: string[];
   macroTags: string[];
   countryCode?: string;
+  currency?: string;
   countryFlag?: string;
+  regionGroup?: Exclude<RegionFilterKey, 'ALL'> | 'GLOBAL';
   aiImpacts?: PortfolioImpactDetail[];
+  macroImpacts?: MacroImpactItem[];
   isLiveSynced?: boolean;
 }
 

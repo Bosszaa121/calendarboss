@@ -6,9 +6,28 @@ import type {
   ChartTimeframe,
   ImpactLevel,
   LiveAssetQuote,
+  RegionFilterKey,
 } from '../types.ts';
 import type { ClassifiedAssetResult, PortfolioEntryInput } from './geminiParsers.ts';
-import { toBangkokDateParts } from './thaiTime.ts';
+import {
+  classifyEventKind,
+  formatBiQuoteValue,
+  inferNewsRegionMeta,
+  resolveCountryCurrencyMeta,
+  translateEconomicTitleTh,
+} from './economicDictionary.ts';
+import { getBangkokTodayIso, toBangkokDateParts } from './thaiTime.ts';
+
+export type RssChannelHint =
+  | 'us_wallstreet'
+  | 'asia'
+  | 'europe_global'
+  | 'commodities'
+  | 'crypto'
+  | 'portfolio'
+  | 'social_x'
+  | 'social_fb'
+  | 'social_yt';
 
 export interface PublicRssHeadline {
   title: string;
@@ -16,7 +35,11 @@ export interface PublicRssHeadline {
   source: string;
   pubDate: string;
   publishedAtMs: number;
-  channelHint: 'macro' | 'portfolio' | 'social_x' | 'social_fb' | 'social_yt';
+  channelHint: RssChannelHint;
+  countryCode: string;
+  currency: string;
+  countryFlag: string;
+  regionGroup: Exclude<RegionFilterKey, 'ALL'> | 'GLOBAL';
 }
 
 const FETCH_TIMEOUT_MS = 8500;
@@ -86,6 +109,7 @@ function parseRssXmlItems(
     }
 
     const parsedMs = pubDate ? Date.parse(pubDate) : NaN;
+    const regionMeta = inferNewsRegionMeta(cleanTitle, source, channelHint);
     items.push({
       title: cleanTitle.slice(0, 180),
       link: link.startsWith('http') ? link : '',
@@ -93,6 +117,10 @@ function parseRssXmlItems(
       pubDate,
       publishedAtMs: Number.isFinite(parsedMs) ? parsedMs : 0,
       channelHint,
+      countryCode: regionMeta.countryCode,
+      currency: regionMeta.currency,
+      countryFlag: regionMeta.countryFlag,
+      regionGroup: regionMeta.regionGroup,
     });
   }
 
@@ -149,13 +177,20 @@ export async function fetchGoogleNewsRss(
             title = rawTitle.slice(0, dashIdx).trim();
           }
           const parsedMs = it.pubDate ? Date.parse(it.pubDate) : NaN;
+          const cleanTitle = title.slice(0, 180);
+          const cleanSource = source.slice(0, 60) || 'Google News';
+          const regionMeta = inferNewsRegionMeta(cleanTitle, cleanSource, channelHint);
           return {
-            title: title.slice(0, 180),
+            title: cleanTitle,
             link: typeof it.link === 'string' && it.link.startsWith('http') ? it.link : '',
-            source: source.slice(0, 60) || 'Google News',
+            source: cleanSource,
             pubDate: it.pubDate || '',
             publishedAtMs: Number.isFinite(parsedMs) ? parsedMs : 0,
             channelHint,
+            countryCode: regionMeta.countryCode,
+            currency: regionMeta.currency,
+            countryFlag: regionMeta.countryFlag,
+            regionGroup: regionMeta.regionGroup,
           };
         });
       }
@@ -183,57 +218,63 @@ export async function collectLivePublicRssNews(
   portfolio: PortfolioEntryInput[],
   useCorsProxy: boolean
 ): Promise<PublicRssHeadline[]> {
-  const heldTickers = portfolio.map((p) => p.symbol).slice(0, 8);
-  const tickerQuery =
-    heldTickers.length > 0
-      ? heldTickers.join(' OR ')
-      : 'QQQM OR SMH OR BLOK OR GLD OR SLV OR KCG OR PEP';
+  const heldTickers = portfolio.map((p) => p.symbol).slice(0, 6);
 
-  const thaiTickers = portfolio
-    .filter((p) => p.category === 'Thai Stock')
-    .map((p) => p.symbol)
-    .slice(0, 5);
-
+  // 5 Core Multi-Region & Asset-Class Google News RSS feeds fetched simultaneously (5 latest items per feed)
   const queries: Array<{
     q: string;
     lang: 'th' | 'en';
-    hint: PublicRssHeadline['channelHint'];
+    hint: RssChannelHint;
     limit: number;
   }> = [
     {
-      q: 'ปฏิทินเศรษฐกิจ เฟด ดอกเบี้ย เงินเฟ้อ กนง ตลาดหุ้นโลก',
+      q: 'Federal Reserve OR "Wall Street" OR "US stocks" OR Nasdaq OR "S&P 500" OR tech stocks',
+      lang: 'en',
+      hint: 'us_wallstreet',
+      limit: 5,
+    },
+    {
+      q: '(BOJ OR Japan yen OR Korea BOK KRW OR China CNY PBOC OR Thailand SET baht OR RBA Australia)',
+      lang: 'en',
+      hint: 'asia',
+      limit: 5,
+    },
+    {
+      q: '(ECB Eurozone EUR OR "Bank of England" GBP OR OPEC oil OR Europe economy OR geopolitics)',
+      lang: 'en',
+      hint: 'europe_global',
+      limit: 5,
+    },
+    {
+      q: '(gold price OR silver price OR copper price OR crude oil Brent WTI commodities)',
+      lang: 'en',
+      hint: 'commodities',
+      limit: 5,
+    },
+    {
+      q: '(Bitcoin OR BTC OR Ethereum OR "crypto market" OR digital assets ETF)',
+      lang: 'en',
+      hint: 'crypto',
+      limit: 5,
+    },
+    // Thai market & currency news feed (ensures THB/SET coverage alongside Asia feed)
+    {
+      q: 'หุ้นไทย SET กนง ค่าเงินบาท เศรษฐกิจไทย ปันผล',
       lang: 'th',
-      hint: 'macro',
-      limit: 10,
-    },
-    {
-      q: 'Federal Reserve CPI inflation jobs report stock market earnings calendar',
-      lang: 'en',
-      hint: 'macro',
-      limit: 10,
-    },
-    {
-      q: `(${tickerQuery}) (stock OR ETF OR dividend OR earnings OR forecast)`,
-      lang: 'en',
-      hint: 'portfolio',
-      limit: 10,
-    },
-    {
-      q:
-        thaiTickers.length > 0
-          ? `(${thaiTickers.join(' OR ')}) (หุ้น OR ปันผล OR XD OR งบการเงิน)`
-          : 'หุ้นไทย SET ปันผล XD ลงทุนแมน Finnomena',
-      lang: 'th',
-      hint: 'social_fb',
-      limit: 8,
-    },
-    {
-      q: `(${tickerQuery}) (YouTube OR CNBC OR Bloomberg OR Reuters OR analysis)`,
-      lang: 'en',
-      hint: 'social_yt',
-      limit: 8,
+      hint: 'asia',
+      limit: 5,
     },
   ];
+
+  // Optional portfolio ticker feed when user holds assets
+  if (heldTickers.length > 0) {
+    queries.push({
+      q: `(${heldTickers.join(' OR ')}) (stock OR ETF OR earnings OR dividend)`,
+      lang: 'en',
+      hint: 'portfolio',
+      limit: 5,
+    });
+  }
 
   const settled = await Promise.allSettled(
     queries.map((cfg) =>
@@ -247,7 +288,7 @@ export async function collectLivePublicRssNews(
   for (const res of settled) {
     if (res.status !== 'fulfilled') continue;
     for (const item of res.value) {
-      const norm = item.title.toLowerCase().slice(0, 70);
+      const norm = item.title.toLowerCase().replace(/[^a-z0-9\u0E00-\u0E7F]/g, '').slice(0, 64);
       if (!norm || seenTitles.has(norm)) continue;
       seenTitles.add(norm);
       combined.push(item);
@@ -255,18 +296,46 @@ export async function collectLivePublicRssNews(
   }
 
   combined.sort((a, b) => (b.publishedAtMs || 0) - (a.publishedAtMs || 0));
-  return combined.slice(0, 42);
+  return combined.slice(0, 35);
 }
 
 // ============================================================================
-// Real Economic Calendar Feed (ForexFactory Public JSON — This Week + Next Week)
-// Converted strictly to Asia/Bangkok (UTC+7) 24-hour format matching Investing.com
+// Multi-Source 54-Country 14-Day Economic Calendar Engine
+// Source 1 (Primary): BiQuote (/api/calendar -2d..+14d & /api/calendar/upcoming)
+// Source 2 (Secondary): ForexFactory (thisweek.json, nextweek.json, thisweek.xml)
+// Converted strictly to Asia/Bangkok (UTC+7) 24-hour format + Zero-AI Thai Dictionary
 // ============================================================================
 
+export const BIQUOTE_CALENDAR_BASE_URL = 'https://biquote.io/api/calendar';
+export const BIQUOTE_UPCOMING_URL = 'https://biquote.io/api/calendar/upcoming';
 export const FF_CALENDAR_THIS_WEEK_URL =
   'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
 export const FF_CALENDAR_NEXT_WEEK_URL =
   'https://nfs.faireconomy.media/ff_calendar_nextweek.json';
+export const FF_CALENDAR_THIS_WEEK_XML_URL =
+  'https://nfs.faireconomy.media/ff_calendar_thisweek.xml';
+
+interface RawBiQuoteEvent {
+  eventId?: string;
+  id?: string;
+  time?: string;
+  date?: string;
+  countryCode?: string;
+  country?: string;
+  currency?: string;
+  name?: string;
+  title?: string;
+  importance?: string | number;
+  impact?: string | number;
+  type?: string;
+  unit?: string | null;
+  multiplier?: string | null;
+  actual?: number | string | null;
+  forecast?: number | string | null;
+  previous?: number | string | null;
+  revisedPrevious?: number | string | null;
+  timeMode?: string;
+}
 
 interface RawForexFactoryEvent {
   title?: string;
@@ -278,97 +347,24 @@ interface RawForexFactoryEvent {
   actual?: string;
 }
 
-const CURRENCY_META: Record<
-  string,
-  {
-    countryCode: string;
-    flag: string;
-    countryNameTh: string;
-    baseMacroTags: string[];
-    defaultAssets: string[];
-  }
-> = {
-  USD: {
-    countryCode: 'US',
-    flag: '🇺🇸',
-    countryNameTh: 'สหรัฐฯ',
-    baseMacroTags: ['us_rates', 'dxy'],
-    defaultAssets: ['QQQM', 'SPY', 'GLD', 'DXY'],
-  },
-  THB: {
-    countryCode: 'TH',
-    flag: '🇹🇭',
-    countryNameTh: 'ไทย',
-    baseMacroTags: ['thai_macro', 'bot_rate', 'usd_thb'],
-    defaultAssets: ['SET', 'USD/THB'],
-  },
-  CNY: {
-    countryCode: 'CN',
-    flag: '🇨🇳',
-    countryNameTh: 'จีน',
-    baseMacroTags: ['china_macro'],
-    defaultAssets: ['GLD', 'SLV', 'KCG'],
-  },
-  EUR: {
-    countryCode: 'EU',
-    flag: '🇪🇺',
-    countryNameTh: 'ยุโรป',
-    baseMacroTags: ['eu_macro'],
-    defaultAssets: ['EUR/USD', 'DXY'],
-  },
-  JPY: {
-    countryCode: 'JP',
-    flag: '🇯🇵',
-    countryNameTh: 'ญี่ปุ่น',
-    baseMacroTags: ['boj_jpy'],
-    defaultAssets: ['USD/JPY', 'QQQM'],
-  },
-  GBP: {
-    countryCode: 'GB',
-    flag: '🇬🇧',
-    countryNameTh: 'อังกฤษ',
-    baseMacroTags: ['uk_macro'],
-    defaultAssets: ['GBP/USD', 'DXY'],
-  },
-  AUD: {
-    countryCode: 'AU',
-    flag: '🇦🇺',
-    countryNameTh: 'ออสเตรเลีย',
-    baseMacroTags: ['china_demand', 'precious_metals'],
-    defaultAssets: ['AUD/USD', 'GLD'],
-  },
-  NZD: {
-    countryCode: 'NZ',
-    flag: '🇳🇿',
-    countryNameTh: 'นิวซีแลนด์',
-    baseMacroTags: ['food_dairy'],
-    defaultAssets: ['KCG'],
-  },
-  CAD: {
-    countryCode: 'CA',
-    flag: '🇨🇦',
-    countryNameTh: 'แคนาดา',
-    baseMacroTags: ['oil_commodity'],
-    defaultAssets: ['WTI'],
-  },
-  CHF: {
-    countryCode: 'CH',
-    flag: '🇨🇭',
-    countryNameTh: 'สวิตเซอร์แลนด์',
-    baseMacroTags: ['eu_macro', 'precious_metals'],
-    defaultAssets: ['GLD'],
-  },
-};
+function addDaysToIso(baseIso: string, deltaDays: number): string {
+  const [y, m, d] = baseIso.split('-').map(Number);
+  const target = new Date(Date.UTC(y, m - 1, d + deltaDays));
+  const yy = target.getUTCFullYear();
+  const mm = String(target.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(target.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
 
-function inferCalendarMacroTags(currency: string, title: string): string[] {
-  const meta = CURRENCY_META[currency];
-  const tags = new Set<string>(meta ? meta.baseMacroTags : ['us_rates']);
+function inferCalendarMacroTags(currency: string, title: string, baseTags: string[]): string[] {
+  const tags = new Set<string>(baseTags);
   const lower = title.toLowerCase();
 
   if (
     lower.includes('cpi') ||
     lower.includes('ppi') ||
     lower.includes('pce') ||
+    lower.includes('hicp') ||
     lower.includes('inflation')
   ) {
     tags.add(currency === 'THB' ? 'thai_cpi' : 'us_inflation');
@@ -400,86 +396,406 @@ function inferCalendarMacroTags(currency: string, title: string): string[] {
     tags.add('dxy');
     tags.add('crypto');
   }
-  if (lower.includes('gdp') || lower.includes('pmi') || lower.includes('retail sales')) {
+  if (lower.includes('gdp') || lower.includes('pmi') || lower.includes('retail sales') || lower.includes('industrial')) {
     tags.add(currency === 'CNY' ? 'china_macro' : 'us_rates');
   }
   if (lower.includes('dairy') || lower.includes('gdt')) {
     tags.add('food_dairy');
   }
-  if (lower.includes('oil') || lower.includes('crude')) {
+  if (lower.includes('oil') || lower.includes('crude') || lower.includes('opec')) {
     tags.add('oil_commodity');
   }
   return Array.from(tags);
 }
 
-function mapForexFactoryImpact(rawImpact: string | undefined): ImpactLevel | null {
+function mapImpactLevel(rawImpact: string | number | undefined): ImpactLevel {
+  if (typeof rawImpact === 'number') {
+    if (rawImpact >= 3) return 3;
+    if (rawImpact === 2) return 2;
+    return 1;
+  }
   const lower = (rawImpact || '').trim().toLowerCase();
-  if (lower === 'high') return 3;
-  if (lower === 'medium') return 2;
-  if (lower === 'low') return 1;
-  return null; // Skip Holiday / Non-Economic noise
+  if (lower === 'high' || lower === '3' || lower === 'red') return 3;
+  if (lower === 'medium' || lower === 'med' || lower === '2' || lower === 'orange') return 2;
+  return 1;
 }
 
-let ffCalendarCache: { events: CalendarEvent[]; fetchedAt: number; expiresAt: number } | null =
+function normalizeTitleForDedup(title: string): string {
+  return (title || '')
+    .toLowerCase()
+    .replace(/\b(m\/m|y\/y|q\/q|mom|yoy|qoq|prelim|final|flash|revised|sa|nsa)\b/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .slice(0, 42);
+}
+
+async function fetchTextViaOptionalProxy(
+  targetUrl: string,
+  useCorsProxy: boolean
+): Promise<string | null> {
+  if (!useCorsProxy) {
+    try {
+      const res = await fetchWithTimeout(targetUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          Accept: 'application/xml, text/xml, text/plain, */*',
+        },
+      });
+      if (!res.ok) return null;
+      return await res.text();
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const res = await fetchWithTimeout(
+      `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`
+    );
+    if (!res.ok) return null;
+    const payload = (await res.json()) as { contents?: string };
+    return typeof payload?.contents === 'string' ? payload.contents : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseForexFactoryXmlDateToUtcIso(dateStr: string, timeStr: string): {
+  utcIso: string;
+  isAllDay: boolean;
+} | null {
+  // ForexFactory XML date format: MM-DD-YYYY (e.g. "11-27-2026")
+  const dMatch = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec((dateStr || '').trim());
+  if (!dMatch) return null;
+  const month = Number(dMatch[1]);
+  const day = Number(dMatch[2]);
+  const year = Number(dMatch[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+
+  const cleanTime = (timeStr || '').trim().toLowerCase();
+  const tMatch = /^(\d{1,2}):(\d{2})\s*(am|pm)$/.exec(cleanTime);
+  if (!tMatch) {
+    // All Day / Tentative / Day 1 / empty -> anchor at 00:00 Bangkok (17:00 prev UTC) so Bangkok date matches exact calendar day
+    const anchorMs = Date.UTC(year, month - 1, day, 0, 0, 0) - 7 * 3600 * 1000;
+    return {
+      utcIso: new Date(anchorMs).toISOString(),
+      isAllDay: true,
+    };
+  }
+
+  let hour = Number(tMatch[1]);
+  const minute = Number(tMatch[2]);
+  const meridiem = tMatch[3];
+  if (meridiem === 'pm' && hour < 12) hour += 12;
+  if (meridiem === 'am' && hour === 12) hour = 0;
+
+  // ForexFactory XML timestamps are published in UTC/GMT
+  const utcMs = Date.UTC(year, month - 1, day, hour, minute, 0);
+  return {
+    utcIso: new Date(utcMs).toISOString(),
+    isAllDay: false,
+  };
+}
+
+function parseForexFactoryXmlEvents(xml: string): Array<RawForexFactoryEvent & { isAllDay?: boolean }> {
+  const results: Array<RawForexFactoryEvent & { isAllDay?: boolean }> = [];
+  const eventRegex = /<event\b[^>]*>([\s\S]*?)<\/event>/gi;
+  let match: RegExpExecArray | null;
+
+  while ((match = eventRegex.exec(xml)) !== null) {
+    const block = match[1];
+    const readTag = (tag: string) => {
+      const m = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i').exec(block);
+      return m ? decodeXmlEntities(m[1]) : '';
+    };
+
+    const title = readTag('title');
+    const country = readTag('country');
+    const dateRaw = readTag('date');
+    const timeRaw = readTag('time');
+    const impact = readTag('impact');
+    const forecast = readTag('forecast');
+    const previous = readTag('previous');
+    const actual = readTag('actual');
+
+    if (!title || !dateRaw) continue;
+    const parsedTs = parseForexFactoryXmlDateToUtcIso(dateRaw, timeRaw);
+    if (!parsedTs) continue;
+
+    results.push({
+      title,
+      country,
+      date: parsedTs.utcIso,
+      impact,
+      forecast,
+      previous,
+      actual,
+      isAllDay: parsedTs.isAllDay,
+    });
+  }
+
+  return results;
+}
+
+function extractBiQuoteArray(payload: unknown): RawBiQuoteEvent[] {
+  if (Array.isArray(payload)) return payload as RawBiQuoteEvent[];
+  if (payload && typeof payload === 'object') {
+    const obj = payload as Record<string, unknown>;
+    if (Array.isArray(obj.events)) return obj.events as RawBiQuoteEvent[];
+    if (Array.isArray(obj.data)) return obj.data as RawBiQuoteEvent[];
+    if (Array.isArray(obj.items)) return obj.items as RawBiQuoteEvent[];
+  }
+  return [];
+}
+
+let unifiedCalendarCache: { events: CalendarEvent[]; fetchedAt: number; expiresAt: number } | null =
   null;
-const FF_CALENDAR_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes normal cache
-const FF_CALENDAR_MIN_REFETCH_MS = 5 * 60 * 1000; // Never hit ForexFactory faster than 5 min (prevents HTTP 429)
+const CALENDAR_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes normal cache
+const CALENDAR_MIN_REFETCH_MS = 3 * 60 * 1000; // Anti-429 floor for forced refreshes
 
 export async function collectLiveEconomicCalendar(
   useCorsProxy = false,
   forceRefresh = false
 ): Promise<CalendarEvent[]> {
   const now = Date.now();
-  if (ffCalendarCache) {
-    if (!forceRefresh && now < ffCalendarCache.expiresAt) {
-      return ffCalendarCache.events;
+  if (unifiedCalendarCache) {
+    if (!forceRefresh && now < unifiedCalendarCache.expiresAt) {
+      return unifiedCalendarCache.events;
     }
-    if (forceRefresh && now - ffCalendarCache.fetchedAt < FF_CALENDAR_MIN_REFETCH_MS) {
-      return ffCalendarCache.events;
+    if (forceRefresh && now - unifiedCalendarCache.fetchedAt < CALENDAR_MIN_REFETCH_MS) {
+      return unifiedCalendarCache.events;
     }
   }
 
-  // Fetch sequentially with a tiny gap to avoid tripping ForexFactory Cloudflare burst 429
-  const rawResults: Array<RawForexFactoryEvent[] | null> = [];
-  const thisWeek = await fetchJsonViaOptionalProxy<RawForexFactoryEvent[]>(
-    FF_CALENDAR_THIS_WEEK_URL,
-    useCorsProxy
-  );
-  rawResults.push(thisWeek);
+  const todayBkk = getBangkokTodayIso(now);
+  const fromIso = addDaysToIso(todayBkk, -2);
+  const slice1End = addDaysToIso(todayBkk, 3);
+  const slice2Start = addDaysToIso(todayBkk, 4);
+  const slice2End = addDaysToIso(todayBkk, 9);
+  const slice3Start = addDaysToIso(todayBkk, 10);
+  const toIso = addDaysToIso(todayBkk, 14);
 
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  const nextWeek = await fetchJsonViaOptionalProxy<RawForexFactoryEvent[]>(
-    FF_CALENDAR_NEXT_WEEK_URL,
-    useCorsProxy
-  );
-  rawResults.push(nextWeek);
+  const biQuoteUrls = [
+    `${BIQUOTE_CALENDAR_BASE_URL}?from=${fromIso}&to=${slice1End}&limit=500`,
+    `${BIQUOTE_CALENDAR_BASE_URL}?from=${slice2Start}&to=${slice2End}&limit=500`,
+    `${BIQUOTE_CALENDAR_BASE_URL}?from=${slice3Start}&to=${toIso}&limit=500`,
+    BIQUOTE_UPCOMING_URL,
+  ];
+
+  // Fetch Primary (BiQuote 54-country 14d in 3 slices + upcoming) AND Secondary (ForexFactory JSON/XML) concurrently
+  const [biSlicesRes, ffBundleRes] = await Promise.allSettled([
+    Promise.allSettled(
+      biQuoteUrls.map((url) => fetchJsonViaOptionalProxy<unknown>(url, useCorsProxy))
+    ),
+    (async () => {
+      // Stagger ForexFactory requests slightly to avoid Cloudflare burst 429
+      const thisWeekJson = await fetchJsonViaOptionalProxy<RawForexFactoryEvent[]>(
+        FF_CALENDAR_THIS_WEEK_URL,
+        useCorsProxy
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      const nextWeekJson = await fetchJsonViaOptionalProxy<RawForexFactoryEvent[]>(
+        FF_CALENDAR_NEXT_WEEK_URL,
+        useCorsProxy
+      );
+      await new Promise((r) => setTimeout(r, 200));
+      const thisWeekXml = await fetchTextViaOptionalProxy(
+        FF_CALENDAR_THIS_WEEK_XML_URL,
+        useCorsProxy
+      );
+      return { thisWeekJson, nextWeekJson, thisWeekXml };
+    })(),
+  ]);
 
   const dedup = new Map<string, CalendarEvent>();
 
-  for (const list of rawResults) {
-    if (!Array.isArray(list)) continue;
+  const upsertCalendarEvent = (candidate: CalendarEvent, dedupKey: string) => {
+    const existing = dedup.get(dedupKey);
+    if (!existing) {
+      dedup.set(dedupKey, candidate);
+      return;
+    }
 
-    for (const raw of list) {
+    // Merge best fields from both BiQuote & ForexFactory
+    const mergedActual =
+      existing.actual !== '—' ? existing.actual : candidate.actual;
+    const mergedForecast =
+      existing.forecast !== '—' ? existing.forecast : candidate.forecast;
+    const mergedPrevious =
+      existing.previous !== '—' ? existing.previous : candidate.previous;
+    const mergedImpact = Math.max(existing.impact, candidate.impact) as ImpactLevel;
+
+    // Prefer exact clock time over all-day placeholder
+    const preferCandidateTime = Boolean(existing.isAllDay && !candidate.isAllDay);
+    // Prefer specific country code (e.g. DE/FR/ES) over generic EU/GLOBAL
+    const preferCandidateCountry =
+      (existing.countryCode === 'EU' || existing.countryCode === 'GLOBAL') &&
+      candidate.countryCode !== 'EU' &&
+      candidate.countryCode !== 'GLOBAL';
+
+    const mergedKind =
+      existing.eventKind && existing.eventKind !== 'indicator'
+        ? existing.eventKind
+        : candidate.eventKind || 'indicator';
+
+    const providers = new Set([
+      ...(existing.sourceProvider ? existing.sourceProvider.split('+') : []),
+      ...(candidate.sourceProvider ? candidate.sourceProvider.split('+') : []),
+    ]);
+
+    dedup.set(dedupKey, {
+      ...existing,
+      time: preferCandidateTime ? candidate.time : existing.time,
+      eventTimestampIso: preferCandidateTime
+        ? candidate.eventTimestampIso
+        : existing.eventTimestampIso,
+      isAllDay: existing.isAllDay && candidate.isAllDay,
+      countryCode: preferCandidateCountry ? candidate.countryCode : existing.countryCode,
+      flag: preferCandidateCountry ? candidate.flag : existing.flag,
+      countryNameTh: preferCandidateCountry ? candidate.countryNameTh : existing.countryNameTh,
+      impact: mergedImpact,
+      eventKind: mergedKind,
+      actual: mergedActual,
+      forecast: mergedForecast,
+      previous: mergedPrevious,
+      actualOutcome: mergedActual === '—' ? 'pending' : existing.actualOutcome,
+      sourceProvider: Array.from(providers).join('+'),
+    });
+  };
+
+  // 1. Ingest BiQuote events (54 countries, full -2d to +14d + upcoming)
+  const biQuoteRaw: RawBiQuoteEvent[] = [];
+  if (biSlicesRes.status === 'fulfilled') {
+    for (const sliceResult of biSlicesRes.value) {
+      if (sliceResult.status === 'fulfilled') {
+        biQuoteRaw.push(...extractBiQuoteArray(sliceResult.value));
+      }
+    }
+  }
+
+  for (const raw of biQuoteRaw) {
+    const originalTitle = (raw.name || raw.title || '').trim();
+    const rawTime = (raw.time || raw.date || '').trim();
+    if (!originalTitle || !rawTime) continue;
+
+    const bkk = toBangkokDateParts(rawTime);
+    if (!bkk) continue;
+    // Keep strictly within -2d .. +14d Bangkok window
+    if (bkk.dateIso < fromIso || bkk.dateIso > toIso) continue;
+
+    const meta = resolveCountryCurrencyMeta(raw.countryCode || raw.country, raw.currency);
+    const eventKind = classifyEventKind(originalTitle, raw.type);
+    const isAllDay =
+      eventKind === 'holiday' ||
+      (typeof raw.timeMode === 'string' &&
+        raw.timeMode.trim().length > 0 &&
+        raw.timeMode.toLowerCase() !== 'exact');
+
+    const impact =
+      eventKind === 'holiday'
+        ? 1
+        : mapImpactLevel(raw.importance ?? raw.impact);
+
+    const actual = formatBiQuoteValue(raw.actual, raw.unit, raw.multiplier);
+    const forecast = formatBiQuoteValue(raw.forecast, raw.unit, raw.multiplier);
+    const previous = formatBiQuoteValue(
+      raw.revisedPrevious ?? raw.previous,
+      raw.unit,
+      raw.multiplier
+    );
+
+    const translatedTitle = translateEconomicTitleTh(
+      originalTitle,
+      meta.countryNameTh,
+      meta.currency
+    );
+
+    const dedupKey = `${bkk.dateIso}|${meta.currency}|${normalizeTitleForDedup(originalTitle)}`;
+    const stableId = `bq-${bkk.dateIso}-${meta.countryCode}-${dedup.size}`;
+    const timeLabel = isAllDay ? 'ตลอดวัน' : bkk.timeLabelTh;
+
+    const kindDesc =
+      eventKind === 'holiday'
+        ? 'วันหยุดตลาด/ธนาคาร'
+        : eventKind === 'meeting'
+        ? 'การประชุมสำคัญ'
+        : eventKind === 'speech'
+        ? 'แถลงการณ์สำคัญ'
+        : eventKind === 'election'
+        ? 'การเลือกตั้ง'
+        : impact === 3
+        ? 'ตัวเลขเศรษฐกิจสำคัญสูง'
+        : impact === 2
+        ? 'ตัวเลขเศรษฐกิจสำคัญกลาง'
+        : 'ตัวเลขเศรษฐกิจทั่วไป';
+
+    upsertCalendarEvent(
+      {
+        id: stableId,
+        date: bkk.dateIso,
+        time: timeLabel,
+        eventTimestampIso: bkk.isoUtc,
+        originalTitle,
+        sourceProvider: 'BiQuote',
+        eventKind,
+        isAllDay,
+        countryCode: meta.countryCode,
+        flag: meta.flag,
+        currency: meta.currency,
+        countryNameTh: meta.countryNameTh,
+        impact,
+        category: 'economic',
+        title: translatedTitle,
+        actual,
+        forecast,
+        previous,
+        actualOutcome: actual === '—' ? 'pending' : 'inline',
+        relatedAssets: meta.defaultAssets,
+        macroTags: inferCalendarMacroTags(meta.currency, originalTitle, meta.baseMacroTags),
+        descriptionTh: `${kindDesc} ${meta.countryNameTh} (${meta.currency}) · เวลาไทย ${timeLabel}`,
+        isLiveSynced: true,
+      },
+      dedupKey
+    );
+  }
+
+  // 2. Ingest ForexFactory JSON (thisweek + nextweek) & XML (Holiday, OPEC, G7, live Actual)
+  if (ffBundleRes.status === 'fulfilled') {
+    const { thisWeekJson, nextWeekJson, thisWeekXml } = ffBundleRes.value;
+    const ffItems: Array<RawForexFactoryEvent & { isAllDay?: boolean }> = [
+      ...(Array.isArray(thisWeekJson) ? thisWeekJson : []),
+      ...(Array.isArray(nextWeekJson) ? nextWeekJson : []),
+      ...(typeof thisWeekXml === 'string' && thisWeekXml.includes('<event')
+        ? parseForexFactoryXmlEvents(thisWeekXml)
+        : []),
+    ];
+
+    for (const raw of ffItems) {
       const originalTitle = typeof raw.title === 'string' ? raw.title.trim() : '';
       const rawDate = typeof raw.date === 'string' ? raw.date.trim() : '';
       if (!originalTitle || !rawDate) continue;
 
-      const impact = mapForexFactoryImpact(raw.impact);
-      if (!impact) continue;
-
       const bkk = toBangkokDateParts(rawDate);
       if (!bkk) continue;
+      if (bkk.dateIso < fromIso || bkk.dateIso > toIso) continue;
 
-      const currency = (typeof raw.country === 'string' ? raw.country : 'USD')
-        .trim()
-        .toUpperCase();
-      const meta = CURRENCY_META[currency] || {
-        countryCode: currency.slice(0, 2) || 'GL',
-        flag: '🌐',
-        countryNameTh: currency || 'ต่างประเทศ',
-        baseMacroTags: ['us_rates'],
-        defaultAssets: ['QQQM', 'GLD'],
-      };
+      const meta = resolveCountryCurrencyMeta(raw.country, raw.country);
+      const rawImpactStr = (raw.impact || '').trim();
+      const eventKind = classifyEventKind(
+        originalTitle,
+        rawImpactStr.toLowerCase() === 'holiday' ? 'holiday' : undefined
+      );
+
+      // ForexFactory marks holidays or all-day OPEC/G7 events with 00:00 placeholder or XML All Day
+      const isAllDay =
+        Boolean(raw.isAllDay) ||
+        eventKind === 'holiday' ||
+        (eventKind === 'meeting' && (bkk.time24 === '07:00' || bkk.time24 === '00:00'));
+
+      const impact: ImpactLevel =
+        eventKind === 'holiday'
+          ? 1
+          : eventKind === 'meeting' && originalTitle.toLowerCase().includes('opec')
+          ? 3
+          : mapImpactLevel(rawImpactStr);
 
       const forecast =
         typeof raw.forecast === 'string' && raw.forecast.trim() ? raw.forecast.trim() : '—';
@@ -488,57 +804,84 @@ export async function collectLiveEconomicCalendar(
       const actual =
         typeof raw.actual === 'string' && raw.actual.trim() ? raw.actual.trim() : '—';
 
-      const dedupKey = `${bkk.dateIso}|${bkk.time24}|${currency}|${originalTitle.toLowerCase()}`;
-      if (dedup.has(dedupKey)) continue;
-
-      const stableId = `ff-${bkk.dateIso}-${bkk.time24.replace(':', '')}-${currency}-${dedup.size}`;
-      const impactTextTh =
-        impact === 3 ? 'ความสำคัญสูง (High Impact)' : impact === 2 ? 'ความสำคัญปานกลาง' : 'ความสำคัญน้อย';
-
-      dedup.set(dedupKey, {
-        id: stableId,
-        date: bkk.dateIso,
-        time: bkk.timeLabelTh, // e.g. "20:30 น.", "01:00 น." (Asia/Bangkok UTC+7)
-        eventTimestampIso: bkk.isoUtc,
+      const translatedTitle = translateEconomicTitleTh(
         originalTitle,
-        sourceProvider: 'ForexFactory',
-        countryCode: meta.countryCode,
-        flag: meta.flag,
-        currency,
-        countryNameTh: meta.countryNameTh,
-        impact,
-        category: 'economic',
-        title: `${originalTitle} (${currency})`,
-        actual,
-        forecast,
-        previous,
-        actualOutcome: actual === '—' ? 'pending' : 'inline',
-        relatedAssets: meta.defaultAssets,
-        macroTags: inferCalendarMacroTags(currency, originalTitle),
-        descriptionTh: `ตัวเลขเศรษฐกิจ ${meta.countryNameTh} (${currency}) ระดับ${impactTextTh} · ประกาศเวลาไทย ${bkk.timeLabelTh}`,
-        isLiveSynced: true,
-      });
+        meta.countryNameTh,
+        meta.currency
+      );
+      const timeLabel = isAllDay ? 'ตลอดวัน' : bkk.timeLabelTh;
+      const dedupKey = `${bkk.dateIso}|${meta.currency}|${normalizeTitleForDedup(originalTitle)}`;
+      const stableId = `ff-${bkk.dateIso}-${bkk.time24.replace(':', '')}-${meta.currency}-${dedup.size}`;
+
+      const kindDesc =
+        eventKind === 'holiday'
+          ? 'วันหยุดตลาด/ธนาคาร'
+          : eventKind === 'meeting'
+          ? 'การประชุมพิเศษ'
+          : eventKind === 'speech'
+          ? 'แถลงการณ์สำคัญ'
+          : eventKind === 'election'
+          ? 'การเลือกตั้ง'
+          : impact === 3
+          ? 'ตัวเลขเศรษฐกิจสำคัญสูง'
+          : impact === 2
+          ? 'ตัวเลขเศรษฐกิจสำคัญกลาง'
+          : 'ตัวเลขเศรษฐกิจทั่วไป';
+
+      upsertCalendarEvent(
+        {
+          id: stableId,
+          date: bkk.dateIso,
+          time: timeLabel,
+          eventTimestampIso: bkk.isoUtc,
+          originalTitle,
+          sourceProvider: 'ForexFactory',
+          eventKind,
+          isAllDay,
+          countryCode: meta.countryCode,
+          flag: meta.flag,
+          currency: meta.currency,
+          countryNameTh: meta.countryNameTh,
+          impact,
+          category: 'economic',
+          title: translatedTitle,
+          actual,
+          forecast,
+          previous,
+          actualOutcome: actual === '—' ? 'pending' : 'inline',
+          relatedAssets: meta.defaultAssets,
+          macroTags: inferCalendarMacroTags(meta.currency, originalTitle, meta.baseMacroTags),
+          descriptionTh: `${kindDesc} ${meta.countryNameTh} (${meta.currency}) · เวลาไทย ${timeLabel}`,
+          isLiveSynced: true,
+        },
+        dedupKey
+      );
     }
   }
 
   const events = Array.from(dedup.values()).sort((a, b) => {
+    if (a.date !== b.date) return a.date.localeCompare(b.date);
+    // Within the same day: pin all-day holidays/meetings first, then sort chronologically UTC+7
+    if (Boolean(a.isAllDay) !== Boolean(b.isAllDay)) {
+      return a.isAllDay ? -1 : 1;
+    }
     const aMs = a.eventTimestampIso ? Date.parse(a.eventTimestampIso) : 0;
     const bMs = b.eventTimestampIso ? Date.parse(b.eventTimestampIso) : 0;
-    return aMs - bMs;
+    if (aMs && bMs && aMs !== bMs) return aMs - bMs;
+    return a.time.localeCompare(b.time);
   });
 
   if (events.length > 0) {
-    ffCalendarCache = {
+    unifiedCalendarCache = {
       events,
       fetchedAt: Date.now(),
-      expiresAt: Date.now() + FF_CALENDAR_CACHE_TTL_MS,
+      expiresAt: Date.now() + CALENDAR_CACHE_TTL_MS,
     };
     return events;
   }
 
-  // Fallback to stale cached ForexFactory events if upstream temporarily returned 429
-  if (ffCalendarCache && ffCalendarCache.events.length > 0) {
-    return ffCalendarCache.events;
+  if (unifiedCalendarCache && unifiedCalendarCache.events.length > 0) {
+    return unifiedCalendarCache.events;
   }
 
   return [];

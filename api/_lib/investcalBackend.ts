@@ -238,17 +238,18 @@ async function generateJsonWithFallback(ai: GoogleGenAI, contents: string) {
       await acquireGeminiSlot();
       const config: {
         responseMimeType: string;
-        temperature: number;
         maxOutputTokens: number;
+        temperature?: number;
         thinkingConfig?: { thinkingLevel: ThinkingLevel };
       } = {
         responseMimeType: 'application/json',
-        temperature: 0.2,
         maxOutputTokens: 8192,
       };
 
       if (model.startsWith('gemini-4')) {
         config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      } else {
+        config.temperature = 0.2;
       }
 
       const response = await Promise.race([
@@ -502,15 +503,20 @@ export async function handleBatchedSync(
         } catch (geminiErr) {
           const formatted = formatServerGeminiError(
             geminiErr,
-            'ไม่สามารถวิเคราะห์เพิ่มเติมด้วย Gemini ได้ชั่วคราว'
+            'ระบบแสดงปฏิทินเศรษฐกิจและข่าวสารล่าสุดจากแหล่งข้อมูลจริงโดยตรง'
           );
+          // Never expose raw JSON syntax error strings as scary red UI banners when public data succeeded
+          const rawErrStr = geminiErr instanceof Error ? geminiErr.message : String(geminiErr || '');
+          const isJsonSyntaxErr = /json|unexpected token|expected/i.test(rawErrStr);
+          const safeWarning = isJsonSyntaxErr ? '' : formatted.message;
+
           return {
             ...buildPublicOnlyFallbackBatchedResponse(
               portfolioEntries,
               rssHeadlines,
               yahooQuotes,
               today,
-              formatted.message,
+              safeWarning,
               realCalendarEvents
             ),
             aiCalled: false,

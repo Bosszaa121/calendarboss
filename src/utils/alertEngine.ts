@@ -475,6 +475,7 @@ export function schedulePreEventCalendarNotifications(params: {
 
     for (const ev of calendarEvents) {
       if (ev.category !== 'economic') continue;
+      if (ev.isAllDay || ev.eventKind === 'holiday') continue;
       const eventMs = parseBangkokEventTimestampMs(ev.date, ev.time, ev.eventTimestampIso);
       if (!eventMs) continue;
 
@@ -532,6 +533,7 @@ export function schedulePreEventCalendarNotifications(params: {
 
   for (const ev of calendarEvents) {
     if (ev.category !== 'economic') continue;
+    if (ev.isAllDay || ev.eventKind === 'holiday') continue;
     const eventMs = parseBangkokEventTimestampMs(ev.date, ev.time, ev.eventTimestampIso);
     if (!eventMs) continue;
 

@@ -19,6 +19,7 @@ import {
   NewsSubTab,
   PortfolioAsset,
   PortfolioImpactDetail,
+  RegionFilterKey,
   Sentiment,
   SocialInsightItem,
   SocialPlatform,
@@ -26,12 +27,17 @@ import {
   SyncSource,
 } from '../types';
 import {
+  REGION_FILTER_OPTIONS,
+  matchesRegionFilter,
+} from '../utils/economicDictionary';
+import {
   analyzePortfolioImpacts,
   isAssetTagMatched,
 } from '../utils/portfolioMatcher';
 import { formatThaiNewsTimestamp } from '../utils/thaiTime';
 import {
   AssetTickerTag,
+  MacroImpactMatrix,
   PortfolioImpactMatrix,
   PortfolioMatchBadge,
   SentimentIndicator,
@@ -61,14 +67,6 @@ interface NewsViewProps {
   onGoToPortfolio: () => void;
 }
 
-const NEWS_COUNTRY_FILTERS: Array<{ code: string; flag: string; label: string }> = [
-  { code: 'ALL', flag: '🌐', label: 'ทั้งหมด' },
-  { code: 'US', flag: '🇺🇸', label: 'สหรัฐฯ' },
-  { code: 'TH', flag: '🇹🇭', label: 'ไทย' },
-  { code: 'CN', flag: '🇨🇳', label: 'จีน' },
-  { code: 'EU', flag: '🇪🇺', label: 'ยุโรป' },
-  { code: 'JP', flag: '🇯🇵', label: 'ญี่ปุ่น' },
-];
 
 function PlatformBadge({ platform }: { platform: SocialPlatform }) {
   if (platform === 'x') {
@@ -152,7 +150,7 @@ export function NewsView({
   onGoToPortfolio,
 }: NewsViewProps) {
   const [sentimentFilter, setSentimentFilter] = useState<'ALL' | Sentiment>('ALL');
-  const [countryFilter, setCountryFilter] = useState<string>('ALL');
+  const [regionFilter, setRegionFilter] = useState<RegionFilterKey>('ALL');
   const [platformFilter, setPlatformFilter] = useState<'ALL' | SocialPlatform>('ALL');
   const [socialSentimentFilter, setSocialSentimentFilter] = useState<'ALL' | SocialSentiment>('ALL');
   const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
@@ -194,7 +192,14 @@ export function NewsView({
     return newsItems
       .filter((item) => {
         if (sentimentFilter !== 'ALL' && item.sentiment !== sentimentFilter) return false;
-        if (countryFilter !== 'ALL' && (item.countryCode || '').toUpperCase() !== countryFilter) {
+        if (
+          !matchesRegionFilter(
+            regionFilter,
+            item.countryCode,
+            item.currency,
+            item.regionGroup
+          )
+        ) {
           return false;
         }
         const impacts = newsImpactsMap.get(item.id) ?? [];
@@ -203,11 +208,12 @@ export function NewsView({
           const hitHeadline = item.headline.toLowerCase().includes(q);
           const hitSummary = item.impactSummary.toLowerCase().includes(q);
           const hitSource = item.source.toLowerCase().includes(q);
+          const hitCurrency = (item.currency || '').toLowerCase().includes(q);
           const hitAssets = item.relatedAssets.some((a) => a.toLowerCase().includes(q));
           const hitImpacts = impacts.some(
             (i) => i.symbol.toLowerCase().includes(q) || i.reasonTh.toLowerCase().includes(q)
           );
-          return hitHeadline || hitSummary || hitSource || hitAssets || hitImpacts;
+          return hitHeadline || hitSummary || hitSource || hitCurrency || hitAssets || hitImpacts;
         }
         return true;
       })
@@ -216,7 +222,7 @@ export function NewsView({
         const bMs = Date.parse(b.publishedAt || '') || 0;
         return bMs - aMs;
       });
-  }, [newsItems, sentimentFilter, countryFilter, onlyPortfolio, newsImpactsMap, searchQuery]);
+  }, [newsItems, sentimentFilter, regionFilter, onlyPortfolio, newsImpactsMap, searchQuery]);
 
   const filteredSocial = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -251,7 +257,7 @@ export function NewsView({
 
   const hasFilters =
     sentimentFilter !== 'ALL' ||
-    countryFilter !== 'ALL' ||
+    regionFilter !== 'ALL' ||
     platformFilter !== 'ALL' ||
     socialSentimentFilter !== 'ALL' ||
     onlyPortfolio ||
@@ -313,8 +319,39 @@ export function NewsView({
           />
         </div>
 
-        {/* Single-Row Scrollable Filter Chips */}
-        <div className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap no-scrollbar pt-1">
+        {/* Row 1 (Global News): 6-Group Regional Filter Bar identical to Calendar */}
+        {subTab === 'global' && (
+          <div
+            role="group"
+            aria-label="กรองข่าวตามภูมิภาค"
+            className="flex items-center gap-1.5 overflow-x-auto whitespace-nowrap no-scrollbar pt-1"
+          >
+            {REGION_FILTER_OPTIONS.map((opt) => {
+              const active = regionFilter === opt.key;
+              return (
+                <button
+                  key={opt.key}
+                  type="button"
+                  onClick={() => setRegionFilter(opt.key)}
+                  className={`px-2.5 min-h-[36px] rounded-xl border text-xs font-medium inline-flex items-center gap-1 shrink-0 transition-colors cursor-pointer ${
+                    active
+                      ? 'bg-amber-500/15 border-amber-500/50 text-amber-200'
+                      : 'bg-[#090C11] border-[#222C3D] text-slate-300'
+                  }`}
+                >
+                  <span>{opt.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Row 2: Single-Row Scrollable Sentiment / Platform / Portfolio Filter Chips */}
+        <div
+          className={`flex items-center gap-1.5 overflow-x-auto whitespace-nowrap no-scrollbar ${
+            subTab === 'global' ? 'pt-2 border-t border-[#1A2230]' : 'pt-1'
+          }`}
+        >
           <button
             type="button"
             role="switch"
@@ -355,21 +392,6 @@ export function NewsView({
                   }`}
                 >
                   {opt.label}
-                </button>
-              ))}
-              {NEWS_COUNTRY_FILTERS.slice(1).map((c) => (
-                <button
-                  key={c.code}
-                  type="button"
-                  onClick={() => setCountryFilter(countryFilter === c.code ? 'ALL' : c.code)}
-                  className={`px-2.5 min-h-[36px] rounded-xl border text-xs font-medium inline-flex items-center gap-1 shrink-0 cursor-pointer ${
-                    countryFilter === c.code
-                      ? 'bg-amber-500/15 border-amber-500/50 text-amber-200'
-                      : 'bg-[#090C11] border-[#222C3D] text-slate-300'
-                  }`}
-                >
-                  <span>{c.flag}</span>
-                  <span>{c.label}</span>
                 </button>
               ))}
             </>
@@ -426,7 +448,7 @@ export function NewsView({
               type="button"
               onClick={() => {
                 setSentimentFilter('ALL');
-                setCountryFilter('ALL');
+                setRegionFilter('ALL');
                 setPlatformFilter('ALL');
                 setSocialSentimentFilter('ALL');
                 onToggleOnlyPortfolio(false);
@@ -495,14 +517,20 @@ export function NewsView({
                       directCount > 0 ? 'border-amber-500/35' : 'border-[#1E2634]'
                     }`}
                   >
-                    {/* Element 1: Flag + Source + Live Bangkok Relative & 24h Time + Sentiment */}
+                    {/* Element 1: Flag + Currency/Region Tag + Source + Live Bangkok Time + Sentiment */}
                     <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="text-slate-400 truncate">
-                        {item.countryFlag || '🌐'} {item.source} ·{' '}
-                        {item.publishedAt
-                          ? formatThaiNewsTimestamp(item.publishedAt, nowMs).timeLabel
-                          : item.timeLabel}
-                      </span>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="inline-flex items-center gap-1 font-mono text-[11px] font-semibold text-slate-200 bg-[#161E2B] border border-[#243044] px-1.5 py-0.5 rounded shrink-0">
+                          <span>{item.countryFlag || '🌍'}</span>
+                          <span>{item.currency || 'Global'}</span>
+                        </span>
+                        <span className="text-slate-400 truncate">
+                          {item.source} ·{' '}
+                          {item.publishedAt
+                            ? formatThaiNewsTimestamp(item.publishedAt, nowMs).timeLabel
+                            : item.timeLabel}
+                        </span>
+                      </div>
                       <SentimentIndicator sentiment={item.sentiment} />
                     </div>
 
@@ -551,6 +579,9 @@ export function NewsView({
                         <p className="text-xs text-slate-300 leading-relaxed">
                           {item.impactSummary}
                         </p>
+                        {item.macroImpacts && item.macroImpacts.length > 0 && (
+                          <MacroImpactMatrix impacts={item.macroImpacts} />
+                        )}
                         {isMatched && (
                           <PortfolioImpactMatrix
                             impacts={impacts}

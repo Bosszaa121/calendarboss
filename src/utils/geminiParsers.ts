@@ -13,6 +13,7 @@ import type {
   FearGreedData,
   ImpactSeverity,
   LiveAssetQuote,
+  MacroImpactItem,
   NewsItem,
   PortfolioImpactDetail,
   SocialInsightItem,
@@ -21,6 +22,7 @@ import type {
   SyncSource,
 } from '../types.ts';
 import type { PublicRssHeadline } from './publicMarketFeeds.ts';
+import { getRegionGroupForCode, resolveCountryCurrencyMeta } from './economicDictionary.ts';
 import {
   ensureThaiClockSuffix,
   formatThaiNewsTimestamp,
@@ -208,16 +210,224 @@ export function getFearGreedLabelTh(value: number): string {
   return 'โลภสุดขีด (Extreme Greed)';
 }
 
-export function extractJsonBlock(rawText: string): string {
+function stripMarkdownAndComments(rawText: string): string {
   const fenced = rawText.match(/```(?:json)?\s*([\s\S]*?)```/i);
   let body = fenced && fenced[1] ? fenced[1].trim() : rawText.trim();
-  const firstBrace = body.indexOf('{');
-  const lastBrace = body.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    body = body.slice(firstBrace, lastBrace + 1);
-  }
-  // Remove trailing commas before closing ] or } which models occasionally emit
+  // Strip any leading/trailing fence markers if unclosed
+  body = body.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  // Remove trailing commas before closing ] or }
   return body.replace(/,\s*([}\]])/g, '$1');
+}
+
+/**
+ * Repairs a truncated JSON fragment by finding the last balanced object/value boundary,
+ * trimming the incomplete tail, and auto-closing any remaining open `[` or `{` brackets.
+ */
+function repairTruncatedJson(fragment: string): string {
+  let inString = false;
+  let escaped = false;
+  const stack: string[] = [];
+  let lastValidEnd = -1;
+
+  for (let i = 0; i < fragment.length; i++) {
+    const ch = fragment[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{' || ch === '[') {
+      stack.push(ch);
+    } else if (ch === '}' || ch === ']') {
+      const expected = ch === '}' ? '{' : '[';
+      if (stack.length > 0 && stack[stack.length - 1] === expected) {
+        stack.pop();
+        // Record every cleanly closed object/array boundary
+        if (stack.length <= 2) {
+          lastValidEnd = i;
+        }
+      }
+    }
+  }
+
+  let candidate = fragment;
+  if (inString || stack.length > 0) {
+    if (lastValidEnd > 0) {
+      candidate = fragment.slice(0, lastValidEnd + 1);
+    } else {
+      // Fall back to last complete comma-separated entry
+      const lastBrace = Math.max(fragment.lastIndexOf('}'), fragment.lastIndexOf(']'));
+      if (lastBrace > 0) {
+        candidate = fragment.slice(0, lastBrace + 1);
+      }
+    }
+  }
+
+  // Recompute remaining open stack on trimmed candidate and auto-close cleanly
+  const openStack: string[] = [];
+  inString = false;
+  escaped = false;
+  for (let i = 0; i < candidate.length; i++) {
+    const ch = candidate[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{' || ch === '[') openStack.push(ch);
+    else if (ch === '}' || ch === ']') {
+      const expected = ch === '}' ? '{' : '[';
+      if (openStack.length > 0 && openStack[openStack.length - 1] === expected) {
+        openStack.pop();
+      }
+    }
+  }
+
+  let repaired = candidate.replace(/,\s*$/, '').replace(/,\s*([}\]])/g, '$1');
+  while (openStack.length > 0) {
+    const opener = openStack.pop();
+    repaired += opener === '[' ? ']' : '}';
+  }
+  return repaired.replace(/,\s*([}\]])/g, '$1');
+}
+
+/**
+ * Resilient JSON Array parser: strips ```json fences, removes trailing commas,
+ * and if the array was truncated mid-response, drops the incomplete tail item and
+ * auto-closes `]` so all completed items are recovered with ZERO UI JSON errors.
+ */
+export function safeParseJsonArray<T = Record<string, unknown>>(rawText: string): T[] {
+  if (!rawText || typeof rawText !== 'string') return [];
+  const cleaned = stripMarkdownAndComments(rawText);
+  const startIdx = cleaned.indexOf('[');
+  if (startIdx === -1) return [];
+
+  const slice = cleaned.slice(startIdx);
+  // Attempt 1: direct parse up to last ']'
+  const lastBracket = slice.lastIndexOf(']');
+  if (lastBracket > 0) {
+    try {
+      const direct = JSON.parse(slice.slice(0, lastBracket + 1).replace(/,\s*([}\]])/g, '$1'));
+      if (Array.isArray(direct)) return direct as T[];
+    } catch {
+      // Fall through to truncation recovery
+    }
+  }
+
+  // Attempt 2: truncate incomplete tail and auto-close `]`
+  let cursor = slice.length;
+  for (let attempt = 0; attempt < 6 && cursor > 1; attempt++) {
+    const sub = slice.slice(0, cursor);
+    const repaired = repairTruncatedJson(sub);
+    try {
+      const parsed = JSON.parse(repaired);
+      if (Array.isArray(parsed)) return parsed as T[];
+    } catch {
+      // Step back to previous closing brace `}` and try again
+      const prevBrace = sub.lastIndexOf('}', cursor - 2);
+      if (prevBrace <= 0) break;
+      cursor = prevBrace + 1;
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Resilient JSON Object parser: recovers top-level object even if Gemini output was truncated
+ * mid-array, extracting individual completed arrays via safeParseJsonArray as last resort.
+ */
+export function safeParseJsonObject(rawText: string): Record<string, unknown> {
+  if (!rawText || typeof rawText !== 'string') return {};
+  const cleaned = stripMarkdownAndComments(rawText);
+  const startIdx = cleaned.indexOf('{');
+  if (startIdx === -1) return {};
+
+  const slice = cleaned.slice(startIdx);
+  const lastBrace = slice.lastIndexOf('}');
+  if (lastBrace > 0) {
+    try {
+      const direct = JSON.parse(slice.slice(0, lastBrace + 1).replace(/,\s*([}\]])/g, '$1'));
+      if (direct && typeof direct === 'object' && !Array.isArray(direct)) {
+        return direct as Record<string, unknown>;
+      }
+    } catch {
+      // Proceed to truncation repair
+    }
+  }
+
+  // Attempt 2: repair truncated JSON object cleanly
+  try {
+    const repaired = repairTruncatedJson(slice);
+    const parsed = JSON.parse(repaired);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Attempt 3: salvage each top-level array independently via safeParseJsonArray
+  }
+
+  const salvaged: Record<string, unknown> = {};
+  const arrayKeys = [
+    'calendarEnrichments',
+    'calendarEvents',
+    'newsItems',
+    'earnings',
+    'dividends',
+    'socialInsights',
+  ];
+
+  for (const key of arrayKeys) {
+    const keyRegex = new RegExp(`"${key}"\\s*:\\s*\\[`);
+    const match = keyRegex.exec(slice);
+    if (!match) continue;
+    const arrStart = match.index + match[0].length - 1;
+    // Slice up to next top-level key or end of string
+    const rest = slice.slice(arrStart);
+    const nextKeyMatch = /\n\s*"[a-zA-Z0-9_]+"\s*:/.exec(rest.slice(1));
+    const arrWindow = nextKeyMatch ? rest.slice(0, nextKeyMatch.index + 1) : rest;
+    const recovered = safeParseJsonArray(arrWindow);
+    if (recovered.length > 0) {
+      salvaged[key] = recovered;
+    }
+  }
+
+  // Also attempt to salvage fearGreed object if intact
+  const fgMatch = /"fearGreed"\s*:\s*(\{[\s\S]*?\})/.exec(slice);
+  if (fgMatch && fgMatch[1]) {
+    try {
+      salvaged.fearGreed = JSON.parse(fgMatch[1].replace(/,\s*([}\]])/g, '$1'));
+    } catch {
+      // ignore
+    }
+  }
+
+  return salvaged;
+}
+
+export function extractJsonBlock(rawText: string): string {
+  const cleaned = stripMarkdownAndComments(rawText);
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    return cleaned.slice(firstBrace, lastBrace + 1).replace(/,\s*([}\]])/g, '$1');
+  }
+  return repairTruncatedJson(cleaned);
 }
 
 export function parsePortfolioPayload(rawPortfolio: unknown): PortfolioEntryInput[] {
@@ -244,8 +454,43 @@ export function parsePortfolioPayload(rawPortfolio: unknown): PortfolioEntryInpu
     }));
 }
 
-function sanitizeAiImpacts(rawImpacts: unknown): PortfolioImpactDetail[] {
+function isSectorMismatch(
+  asset: PortfolioEntryInput | undefined,
+  reasonTh: string
+): boolean {
+  if (!asset) return false;
+  const reasonLower = reasonTh.toLowerCase();
+  const sectorLower = (asset.sector || '').toLowerCase();
+  const isTechOrChipAsset =
+    sectorLower.includes('chip') ||
+    sectorLower.includes('semi') ||
+    sectorLower.includes('tech') ||
+    sectorLower.includes('ชิป') ||
+    sectorLower.includes('เทค') ||
+    asset.symbol === 'QQQM' ||
+    asset.symbol === 'SMH' ||
+    asset.symbol === 'NVDA';
+
+  // Prevent hallucinating US chip/AI reasons onto non-tech Thai food/bank/consumer stocks (e.g. KCG)
+  if (
+    !isTechOrChipAsset &&
+    asset.category === 'Thai Stock' &&
+    (reasonLower.includes('หุ้นชิป') ||
+      reasonLower.includes('เซมิคอนดักเตอร์') ||
+      reasonLower.includes('semiconductor') ||
+      reasonLower.includes('ai สหรัฐ'))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function sanitizeAiImpacts(
+  rawImpacts: unknown,
+  portfolioEntries: PortfolioEntryInput[] = []
+): PortfolioImpactDetail[] {
   if (!Array.isArray(rawImpacts)) return [];
+  const portfolioByUpper = new Map(portfolioEntries.map((p) => [p.symbol.toUpperCase(), p]));
   return rawImpacts
     .filter(
       (x): x is Record<string, unknown> =>
@@ -254,19 +499,49 @@ function sanitizeAiImpacts(rawImpacts: unknown): PortfolioImpactDetail[] {
         typeof (x as Record<string, unknown>).symbol === 'string'
     )
     .map((x) => {
+      const symbol = String(x.symbol).trim().toUpperCase();
       const direction: AssetDirection =
         x.direction === 'bullish' || x.direction === 'bearish' ? x.direction : 'neutral';
       const severity: ImpactSeverity =
         x.severity === 'high' ? 'high' : x.severity === 'low' ? 'low' : 'medium';
+      const reasonTh = typeof x.reasonTh === 'string' ? x.reasonTh.trim().slice(0, 120) : '';
       return {
-        symbol: String(x.symbol).trim().toUpperCase(),
+        symbol,
         relation: x.relation === 'indirect' ? ('indirect' as const) : ('direct' as const),
         severity,
         direction,
-        reasonTh: typeof x.reasonTh === 'string' ? x.reasonTh.slice(0, 220) : '',
+        reasonTh,
       };
     })
-    .filter((x) => x.reasonTh.length > 0);
+    .filter((x) => {
+      if (!x.reasonTh) return false;
+      const asset = portfolioByUpper.get(x.symbol);
+      if (portfolioByUpper.size > 0 && !asset) return false;
+      return !isSectorMismatch(asset, x.reasonTh);
+    })
+    .slice(0, 4);
+}
+
+function sanitizeMacroImpacts(rawMacro: unknown): MacroImpactItem[] {
+  if (!Array.isArray(rawMacro)) return [];
+  return rawMacro
+    .filter(
+      (x): x is Record<string, unknown> =>
+        Boolean(x) &&
+        typeof x === 'object' &&
+        typeof (x as Record<string, unknown>).asset === 'string'
+    )
+    .map((x) => {
+      const direction: AssetDirection =
+        x.direction === 'bullish' || x.direction === 'bearish' ? x.direction : 'neutral';
+      return {
+        asset: String(x.asset).trim().slice(0, 24),
+        direction,
+        noteTh: typeof x.noteTh === 'string' ? x.noteTh.trim().slice(0, 96) : '',
+      };
+    })
+    .filter((x) => x.asset.length > 0 && x.noteTh.length > 0)
+    .slice(0, 6);
 }
 
 function sanitizeForecasts(rawForecasts: unknown): AssetDirectionForecast[] {
@@ -284,14 +559,15 @@ function sanitizeForecasts(rawForecasts: unknown): AssetDirectionForecast[] {
       return {
         symbol: String(x.symbol).trim().toUpperCase(),
         direction,
-        reasonTh: typeof x.reasonTh === 'string' ? x.reasonTh.slice(0, 220) : '',
+        reasonTh: typeof x.reasonTh === 'string' ? x.reasonTh.trim().slice(0, 140) : '',
         scenarioNoteTh:
           typeof x.scenarioNoteTh === 'string' && x.scenarioNoteTh.trim()
-            ? x.scenarioNoteTh.slice(0, 160)
+            ? x.scenarioNoteTh.trim().slice(0, 120)
             : undefined,
       };
     })
-    .filter((x) => x.symbol.length > 0 && x.reasonTh.length > 0);
+    .filter((x) => x.symbol.length > 0 && x.reasonTh.length > 0)
+    .slice(0, 4);
 }
 
 // ============================================================================
@@ -432,34 +708,78 @@ export function parseClassifiedAssetResponse(
 }
 
 // ============================================================================
-// 2. SINGLE BATCHED REQUEST (Calendar + News + Earnings/XD + Social in 1 Call!)
+// 2. SINGLE BATCHED REQUEST (Bounded <= 20 Priority Items: 12 Calendar + 8 News)
 // ============================================================================
 
+/**
+ * Selects strictly at most 12 High/Medium priority calendar events from yesterday (-1d)
+ * through next 7 days (+7d) so total AI input never exceeds 20 items (12 cal + 8 news).
+ * All remaining events across 54 countries display immediately via Zero-AI Thai dictionary.
+ */
 function selectPriorityCalendarForAi(
   realCalendarEvents: CalendarEvent[],
   today: string,
-  maxItems = 28
+  maxItems = 12
 ): CalendarEvent[] {
-  if (realCalendarEvents.length <= maxItems) return realCalendarEvents;
-  const scored = realCalendarEvents.map((ev) => {
+  const windowEvents = realCalendarEvents.filter((ev) => {
+    const diff = computeCalendarDayDiff(ev.date, today);
+    if (diff === null || diff < -1 || diff > 7) return false;
+    return ev.impact >= 2 || ev.eventKind === 'meeting' || ev.eventKind === 'election';
+  });
+
+  const pool = windowEvents.length > 0 ? windowEvents : realCalendarEvents;
+  const scored = pool.map((ev) => {
     const diff = computeCalendarDayDiff(ev.date, today) ?? 99;
-    const isNear = diff >= -1 && diff <= 14 ? 10 : 0;
+    const isTodayOrTomorrow = diff >= 0 && diff <= 1 ? 16 : diff >= -1 && diff <= 7 ? 8 : 0;
     const isMajorCcy =
       ev.currency === 'USD' ||
       ev.currency === 'THB' ||
       ev.currency === 'CNY' ||
-      ev.currency === 'EUR' ||
       ev.currency === 'JPY' ||
+      ev.currency === 'KRW' ||
+      ev.currency === 'EUR' ||
       ev.currency === 'GBP'
-        ? 4
+        ? 5
         : 0;
-    const score = ev.impact * 20 + isNear + isMajorCcy - Math.abs(diff);
+    const score = ev.impact * 22 + isTodayOrTomorrow + isMajorCcy - Math.abs(diff);
     return { ev, score };
   });
+
   return scored
     .sort((a, b) => b.score - a.score)
     .slice(0, maxItems)
     .map((x) => x.ev);
+}
+
+/**
+ * Picks up to 8 newest RSS headlines balanced across all 5 regional/asset feeds.
+ */
+function selectPriorityRssIndicesForAi(
+  rssHeadlines: PublicRssHeadline[],
+  maxItems = 8
+): number[] {
+  const picked: number[] = [];
+  const used = new Set<number>();
+  const priorityHints = ['us_wallstreet', 'asia', 'europe_global', 'commodities', 'crypto'];
+
+  // First pass: ensure at least 1 newest article from each of the 5 feeds
+  for (const hint of priorityHints) {
+    const idx = rssHeadlines.findIndex((r, i) => !used.has(i) && r.channelHint === hint);
+    if (idx !== -1 && picked.length < maxItems) {
+      used.add(idx);
+      picked.push(idx);
+    }
+  }
+
+  // Fill remaining slots with strictly newest headlines overall
+  for (let i = 0; i < rssHeadlines.length && picked.length < maxItems; i++) {
+    if (!used.has(i)) {
+      used.add(i);
+      picked.push(i);
+    }
+  }
+
+  return picked.sort((a, b) => a - b);
 }
 
 export function buildBatchedInvestCalPrompt(
@@ -471,7 +791,7 @@ export function buildBatchedInvestCalPrompt(
 ): string {
   const todayThai = getThaiFullDateLabel(today);
   const yesterday = addDaysFromIso(today, -1);
-  const endDate = addDaysFromIso(today, 14);
+  const endDate = addDaysFromIso(today, 7);
 
   const portfolioBlock =
     portfolioEntries.length > 0
@@ -479,20 +799,21 @@ export function buildBatchedInvestCalPrompt(
           .map((p) => {
             const q = yahooQuotes[p.symbol];
             const quoteInfo = q
-              ? ` | YahooLive: price=${q.price ?? '—'} ${q.currency}, chg=${
-                  q.changePercent !== null ? `${q.changePercent}%` : '—'
-                }, yield=${q.dividendYield ?? '—'}, lastPaidXD=${
+              ? ` | Price=${q.price ?? '—'} ${q.currency}, Yield=${q.dividendYield ?? '—'}, lastXD=${
                   q.lastPaidXdDate ?? '—'
-                }, lastPaidDPS=${q.lastPaidDps ?? '—'}, upcomingXD=${q.upcomingXdDate ?? 'none'}`
-              : ' | YahooLive: unavailable';
+                }, upcomingXD=${q.upcomingXdDate ?? 'none'}`
+              : '';
             const topH = p.topHoldings?.length
               ? ` | TopHoldings=${p.topHoldings.join(',')}`
               : '';
-            return `- ${p.symbol} (${p.name} · ${p.category}${p.sector ? ` · ${p.sector}` : ''}${topH}${quoteInfo})`;
+            return `- ${p.symbol} | ชื่อ: ${p.name} | ประเภท: ${p.category} | ธุรกิจจริง: ${
+              p.sector || 'ทั่วไป'
+            }${topH}${quoteInfo}`;
           })
           .join('\n')
-      : '- พอร์ตยังว่าง (วิเคราะห์ทิศทางต่อสินทรัพย์อ้างอิงหลัก เช่น QQQM, SMH, BLOK, GLD, SLV, KCG, PEP, BTC)';
+      : '- พอร์ตยังว่าง (วิเคราะห์ macroImpacts เป็นหลัก และใส่ portfolioImpacts เป็น [])';
 
+  // Hard cap: <= 12 calendar events + <= 8 news items = <= 20 priority items per Gemini request
   const priorityCalendar = selectPriorityCalendarForAi(realCalendarEvents, today, 12);
   const hasRealCalendar = priorityCalendar.length > 0;
 
@@ -500,77 +821,79 @@ export function buildBatchedInvestCalPrompt(
     ? priorityCalendar
         .map(
           (ev) =>
-            `[${ev.id}] ${ev.date} ${ev.time} | ${ev.currency} (${ev.countryNameTh}) | Impact=${
+            `[${ev.id}] ${ev.date} ${ev.time} | ${ev.countryCode}/${ev.currency} (${ev.countryNameTh}) | Impact=${
               ev.impact === 3 ? 'High' : ev.impact === 2 ? 'Medium' : 'Low'
-            } | Title="${ev.originalTitle || ev.title}" | Actual=${ev.actual} | Forecast=${
-              ev.forecast
-            } | Previous=${ev.previous}`
+            } | Kind=${ev.eventKind || 'indicator'} | Title="${ev.originalTitle || ev.title}" | Actual=${
+              ev.actual
+            } | Forecast=${ev.forecast} | Previous=${ev.previous}`
         )
         .join('\n')
-    : '(ไม่พบฟีดปฏิทินเศรษฐกิจ ForexFactory ชั่วคราว)';
+    : '(ไม่พบฟีดปฏิทินชั่วคราว)';
 
+  const priorityRssIndices = selectPriorityRssIndicesForAi(rssHeadlines, 8);
   const rssBlock =
-    rssHeadlines.length > 0
-      ? rssHeadlines
-          .map(
-            (r, idx) =>
-              `[${idx}] (${r.channelHint}) [${r.source}] ${r.title}${
-                r.pubDate ? ` | pubDate: ${r.pubDate}` : ''
-              }${r.link ? ` | URL: ${r.link}` : ''}`
-          )
+    priorityRssIndices.length > 0
+      ? priorityRssIndices
+          .map((idx) => {
+            const r = rssHeadlines[idx];
+            return `[${idx}] (${r.countryFlag} ${r.currency}/${r.channelHint}) [${r.source}] ${r.title}${
+              r.pubDate ? ` | pubDate: ${r.pubDate}` : ''
+            }${r.link ? ` | URL: ${r.link}` : ''}`;
+          })
           .join('\n')
       : '(ไม่พบข่าว RSS ชั่วคราว)';
 
-  return `คุณเป็นนักวิเคราะห์การเงินและบรรณาธิการข่าวการลงทุนระดับสถาบัน วันนี้คือ ${todayThai} (${today}, เวลาประเทศไทย Asia/Bangkok UTC+7)
-งานของคุณคือวิเคราะห์ข้อมูลจริง 3 แหล่งด้านล่างนี้ (แยกปฏิทินเศรษฐกิจจริงออกจากข่าวทั่วไปชัดเจน) เพื่อตอบเป็น JSON ชุดเดียวเท่านั้น
+  return `คุณเป็นนักวิเคราะห์การเงินระดับสถาบัน วันนี้คือ ${todayThai} (${today}, เวลาไทย UTC+7)
+วิเคราะห์ข้อมูลจริงด้านล่าง (รวมไม่เกิน 20 รายการสำคัญ) แล้วตอบเป็น JSON ที่ถูกต้อง 100% เพียงชุดเดียวเท่านั้น
 
-=== 1. สินทรัพย์ในพอร์ตของผู้ใช้ + ราคา/ปันผลจริงจาก Yahoo Finance ===
+=== 1. พอร์ตจริงของผู้ใช้ (ต้องวิเคราะห์ตรงกลุ่มธุรกิจจริงเท่านั้น!) ===
 ${portfolioBlock}
 
-=== 2. ตารางปฏิทินเศรษฐกิจจริงสัปดาห์นี้-สัปดาห์หน้า (ForexFactory — แปลงเป็นเวลาไทย UTC+7 แล้ว) ===
+=== 2. เหตุการณ์เศรษฐกิจสำคัญคัดแล้ว (${priorityCalendar.length} รายการ, เวลาไทย UTC+7) ===
 ${calendarBlock}
 
-=== 3. หัวข้อข่าวสดจริงจาก Google News RSS (เรียงจากใหม่ล่าสุด) ===
+=== 3. ข่าวเด่นล่าสุด 5 ภูมิภาค (${priorityRssIndices.length} รายการจาก RSS) ===
 ${rssBlock}
 
-กฎเหล็กป้องกันการแต่งข้อมูล (STRICT RULES):
-1. สำหรับตารางปฏิทินเศรษฐกิจจริงในข้อ 2: ห้ามเปลี่ยนวันที่ เวลา ค่าคาดการณ์ ครั้งก่อน หรือค่าจริงเด็ดขาด! ให้ส่งคืนใน "calendarEnrichments" โดยอ้างอิง "id" เดิมทุกตัวที่สำคัญ เพื่อแปลชื่อตัวเลขเศรษฐกิจเป็นภาษาไทยที่เข้าใจง่าย (วงเล็บชื่ออังกฤษสั้นๆ เช่น "ดัชนีราคาผู้บริโภคพื้นฐานสหรัฐฯ (Core CPI m/m)") พร้อมวิเคราะห์ผลกระทบต่อหุ้นในพอร์ต ("bullish"=ขึ้น, "bearish"=ลง, "neutral"=คงที่)
-2. สำหรับข่าวใน "newsItems": ห้ามนำตารางปฏิทินมาปน ให้ดึงจากหัวข้อข่าวจริงในข้อ 3 เท่านั้น และต้องระบุ "rssIndex" (เลขดัชนี [0], [1], ... ในข้อ 3) พร้อม "sourceUrl" จริง เพื่อให้ระบบแสดงเวลาไทยจริงและเรียงข่าวใหม่สุดได้แม่นยำ 100%
-3. ห้ามเดาวันขึ้นเครื่องหมาย XD รอบถัดไปเองเด็ดขาด! ใส่ "xdStatus": "announced" และ "xdDate": "YYYY-MM-DD" ได้เฉพาะเมื่อมีใน Yahoo Finance (upcomingXD) หรือข่าว RSS ด้านบน >= ${today} เท่านั้น
-4. สินทรัพย์ที่ไม่มีปันผลและไม่อิงงบ (เช่น GLD, SLV, IBIT, BTC, ETH, XAUUSD, XAGUSD, Forex) ให้ตั้ง "applicable": false, "xdStatus": "not_applicable", "status": "not_applicable"
-5. ห้ามแต่ง URL ปลอม หรือแต่งค่า Actual ที่ยังไม่ประกาศ
+กฎเหล็ก (STRICT RULES):
+1. ห้ามแต่งตัวเลขหรือเปลี่ยนวันเวลาของปฏิทินข้อ 2 ให้ส่งคืนใน "calendarEnrichments" อ้างอิง "id" เดิม
+2. บีบอัดคำอธิบายใน "portfolioImpacts" และ "macroImpacts" ให้สั้นกระชับมาก **ไม่เกิน 6-8 คำภาษาไทย** ต่อรายการ!
+3. วิเคราะห์ "portfolioImpacts" ให้ตรงกลุ่มธุรกิจจริงของหุ้นในพอร์ตเท่านั้น ห้ามโยงข้ามกลุ่ม (เช่น KCG คือหุ้นอาหาร/นม-เนยในไทย กระทบจากต้นทุนนม ค่าเงินบาท กำลังซื้อไทย ไม่ใช่หุ้นชิป/เทคสหรัฐฯ) ถ้าไม่เกี่ยวข้องให้ใส่ []
+4. ใน "macroImpacts" ให้เลือกเฉพาะ 3-4 สินทรัพย์ที่กระทบจริงจาก: ค่าเงินเจ้าของข่าว (เช่น USD/JPY/KRW/EUR/GBP), THB, CNY, Gold, Silver, Copper, BTC, หุ้นหลัก
+5. สำหรับ "newsItems" ให้ระบุ "rssIndex" ตรงกับเลข [index] ในข้อ 3 พร้อมธงชาติ รหัสประเทศ และสกุลเงินจริง
+6. ห้ามเดาวัน XD เอง ใส่ "xdStatus": "announced" และ "xdDate" ได้เฉพาะที่มีใน Yahoo Finance (upcomingXD) >= ${today} เท่านั้น
+7. ห้ามใส่คอมเมนต์ใดๆ ใน JSON
 
-ตอบกลับเป็น JSON เพียงอย่างเดียวตามโครงสร้างนี้:
+ตอบกลับเป็น JSON เท่านั้น:
 {
   "fearGreed": {
-    "value": <ตัวเลขประเมินอารมณ์ตลาดโลก 0-100 จากข่าว RSS จริงวันนี้>,
-    "previousClose": <ตัวเลขประมาณการวันก่อนหน้า 0-100>,
-    "oneWeekAgo": <ตัวเลข 1 สัปดาห์ก่อน 0-100>,
-    "oneMonthAgo": <ตัวเลข 1 เดือนก่อน 0-100>,
-    "marketNote": "<สรุปบรรยากาศตลาดโลกวันนี้จากข่าว RSS จริง 1 ประโยคภาษาไทย>"
+    "value": <0-100>,
+    "previousClose": <0-100>,
+    "oneWeekAgo": <0-100>,
+    "oneMonthAgo": <0-100>,
+    "marketNote": "<สรุปบรรยากาศตลาดโลกวันนี้สั้นๆ 1 ประโยค>"
   },
   "calendarEnrichments": [
     {
-      "id": "<id ตรงตามรายการในข้อ 2 เช่น ff-2026-...>",
-      "titleTh": "<ชื่อตัวเลขเศรษฐกิจแปลไทยกระชับ พร้อมตัวย่ออังกฤษ>",
-      "descriptionTh": "<คำอธิบายสั้น 1 ประโยคว่าตัวเลขนี้ส่งผลต่อตลาดและดอกเบี้ยอย่างไร>",
+      "id": "<id ตรงตามข้อ 2>",
+      "titleTh": "<ชื่อตัวเลขแปลไทยกระชับ>",
+      "descriptionTh": "<อธิบายผลกระทบต่อตลาดสั้นๆ 1 ประโยค>",
       "actualOutcome": "<better | worse | inline | pending>",
-      "relatedAssets": ["<Ticker ที่เกี่ยวข้อง>"],
-      "assetForecasts": [
+      "relatedAssets": ["<Ticker>"],
+      "portfolioImpacts": [
         {
-          "symbol": "<Ticker ในพอร์ตหรือสินทรัพย์หลักที่เกี่ยวข้อง>",
-          "direction": "<bullish | bearish | neutral>",
-          "reasonTh": "<เหตุผลสั้นกระชับภาษาไทยว่าทำไมคาดว่าจะขึ้น/ลง/คงที่>",
-          "scenarioNoteTh": "<เช่น หากสูงกว่าคาด -> กดดันลง / ต่ำกว่าคาด -> หนุนขึ้น>"
-        }
-      ],
-      "aiImpacts": [
-        {
-          "symbol": "<เฉพาะ Ticker ที่มีอยู่ในพอร์ตจริงของผู้ใช้เท่านั้น (ถ้าพอร์ตว่างใส่ [])>",
+          "symbol": "<เฉพาะ Ticker ในพอร์ตจริงที่ตรงธุรกิจ>",
           "relation": "<direct | indirect>",
           "severity": "<high | medium | low>",
           "direction": "<bullish | bearish | neutral>",
-          "reasonTh": "<เหตุผลสั้นกระชับ 1 ประโยค>"
+          "reasonTh": "<กระชับไม่เกิน 6-8 คำ>"
+        }
+      ],
+      "macroImpacts": [
+        {
+          "asset": "<USD|THB|CNY|JPY|KRW|EUR|GBP|Gold|Silver|Copper|BTC|S&P500>",
+          "direction": "<bullish | bearish | neutral>",
+          "noteTh": "<กระชับไม่เกิน 6-8 คำ>"
         }
       ]
     }
@@ -582,12 +905,12 @@ ${rssBlock}
     {
       "date": "<YYYY-MM-DD ระหว่าง ${yesterday} ถึง ${endDate}>",
       "time": "<HH:mm น. เวลาไทย UTC+7>",
-      "countryCode": "<US|TH|CN|EU|JP|GB>",
-      "flag": "<อีโมจิธงชาติ>",
-      "currency": "<USD|THB|CNY|EUR|JPY|GBP>",
+      "countryCode": "<US|TH|CN|EU|JP|KR|GB|AU|NZ>",
+      "flag": "<ธงชาติ>",
+      "currency": "<USD|THB|CNY|EUR|JPY|KRW|GBP|AUD|NZD>",
       "countryNameTh": "<ชื่อประเทศภาษาไทย>",
       "impact": <1 | 2 | 3>,
-      "category": "<economic | earnings | dividend>",
+      "category": "economic",
       "title": "<ชื่อเหตุการณ์ภาษาไทย>",
       "actual": "—",
       "forecast": "—",
@@ -595,99 +918,96 @@ ${rssBlock}
       "actualOutcome": "pending",
       "relatedAssets": ["<Ticker>"],
       "macroTags": ["us_rates"],
-      "descriptionTh": "<คำอธิบาย 1 ประโยค>",
-      "assetForecasts": [],
-      "aiImpacts": []
+      "descriptionTh": "<สั้นๆ 1 ประโยค>",
+      "portfolioImpacts": [],
+      "macroImpacts": []
     }
   ],`
   }
   "newsItems": [
     {
-      "rssIndex": <เลขดัชนี [0..41] จากรายการข่าว RSS ในข้อ 3>,
-      "source": "<ชื่อแหล่งข่าวจริงจาก RSS>",
-      "sourceUrl": "<URL จริงจากรายการ RSS ด้านบน>",
-      "headline": "<พาดหัวข่าวจริงแปลเป็นภาษาไทยกระชับ>",
-      "impactSummary": "<อธิบายผลกระทบต่อตลาด/พอร์ต 1-2 ประโยคภาษาไทย>",
+      "rssIndex": <เลขดัชนีจากข้อ 3>,
+      "source": "<ชื่อแหล่งข่าวจริง>",
+      "sourceUrl": "<URL จริงจากข้อ 3>",
+      "headline": "<พาดหัวแปลไทยกระชับ>",
+      "impactSummary": "<สรุปผลกระทบ 1 ประโยคสั้นๆ>",
       "sentiment": "<bullish | bearish | neutral>",
       "relatedAssets": ["<Ticker>"],
       "macroTags": ["<แท็ก>"],
-      "countryCode": "<US|TH|CN|EU|JP|GB|GLOBAL>",
-      "countryFlag": "<อีโมจิธงชาติ>",
-      "aiImpacts": [
+      "countryCode": "<US|JP|KR|CN|TH|EU|GB|AU|NZ|GLOBAL>",
+      "currency": "<USD|JPY|KRW|CNY|THB|EUR|GBP|AUD|NZD|Global>",
+      "countryFlag": "<ธงชาติ>",
+      "portfolioImpacts": [
         {
-          "symbol": "<เฉพาะ Ticker ในพอร์ตจริงเท่านั้น>",
+          "symbol": "<เฉพาะ Ticker ในพอร์ตจริงที่ตรงธุรกิจ>",
           "relation": "<direct | indirect>",
           "severity": "<high | medium | low>",
           "direction": "<bullish | bearish | neutral>",
-          "reasonTh": "<เหตุผลภาษาไทย>"
+          "reasonTh": "<กระชับไม่เกิน 6-8 คำ>"
+        }
+      ],
+      "macroImpacts": [
+        {
+          "asset": "<USD|THB|CNY|Gold|Silver|Copper|BTC|...>",
+          "direction": "<bullish | bearish | neutral>",
+          "noteTh": "<กระชับไม่เกิน 6-8 คำ>"
         }
       ]
     }
   ],
   "earnings": [
     {
-      "portfolioSymbol": "<Ticker ในพอร์ตจริง (ถ้าพอร์ตว่างให้คืน [])>",
-      "reportedSymbol": "<Ticker บริษัทที่รายงานงบ>",
+      "portfolioSymbol": "<Ticker ในพอร์ตจริง (พอร์ตว่างใส่ [])>",
+      "reportedSymbol": "<Ticker>",
       "reportedName": "<ชื่อบริษัท>",
       "isTopHolding": false,
-      "holdingWeight": "<สัดส่วนใน ETF ถ้ามี หรือเว้นว่าง>",
-      "flag": "<อีโมจิธงชาติ>",
-      "reportDate": "<YYYY-MM-DD ถ้ามีในข้อมูลจริง มิฉะนั้นใส่ —>",
-      "periodLabel": "<เช่น งบล่าสุด หรือ ไม่อิงงบการเงิน>",
-      "revenueSummary": "<สรุปรายได้/ภาพรวมจากข่าว RSS หรือ รอประกาศงบ>",
-      "profitSummary": "<สรุปกำไร/EPS จากข่าว RSS หรือ รอประกาศงบ>",
-      "yoyChange": "<% YoY ถ้าปรากฏในข่าว หรือเว้นว่าง>",
+      "flag": "<ธงชาติ>",
+      "reportDate": "<YYYY-MM-DD หรือ —>",
+      "periodLabel": "<งบล่าสุด หรือ ไม่อิงงบการเงิน>",
+      "revenueSummary": "<สรุปสั้น หรือ รอประกาศงบ>",
+      "profitSummary": "<สรุปสั้น หรือ รอประกาศงบ>",
       "status": "<beat | inline | miss | upcoming | not_applicable>",
-      "trendSummaryTh": "<สรุปแนวโน้มธุรกิจจากข่าว RSS และความเคลื่อนไหวราคา 1-2 ประโยคภาษาไทย>"
+      "trendSummaryTh": "<แนวโน้มสั้น 1 ประโยค>"
     }
   ],
   "dividends": [
     {
-      "symbol": "<Ticker ในพอร์ตจริง (ถ้าพอร์ตว่างให้คืน [])>",
+      "symbol": "<Ticker ในพอร์ตจริง (พอร์ตว่างใส่ [])>",
       "name": "<ชื่อเต็ม>",
-      "flag": "<อีโมจิธงชาติ>",
+      "flag": "<ธงชาติ>",
       "applicable": true,
       "xdStatus": "<announced | unannounced | not_applicable>",
-      "notApplicableReasonTh": "<ถ้า applicable=false ใส่ 'ไม่มีปันผล / ไม่อิงงบการเงิน'>",
-      "xdDate": "<YYYY-MM-DD เฉพาะกรณีมีประกาศทางการ >= ${today} ใน Yahoo/RSS มิฉะนั้นใส่ null>",
-      "dps": "<ปันผลต่อหุ้นจาก Yahoo/RSS หรือ —>",
-      "dividendYield": "<อัตราปันผลจาก Yahoo Finance เช่น 3.45% หรือ —>",
-      "payDate": "<YYYY-MM-DD ถ้ามีประกาศจริง มิฉะนั้นใส่ —>",
-      "lastPaidXdDate": "<YYYY-MM-DD จาก Yahoo Finance lastPaidXD หรือ —>",
-      "lastPaidDps": "<จาก Yahoo Finance lastPaidDPS หรือ —>",
-      "lastPaidPayDate": "<YYYY-MM-DD ถ้าทราบ มิฉะนั้นใส่ —>",
-      "frequency": "<เช่น รายไตรมาส / ปีละ 1-2 ครั้ง / รายเดือน>",
-      "noteTh": "<หมายเหตุสั้นๆ 1 ประโยคภาษาไทย (ห้ามเดาวัน XD)>"
+      "xdDate": "<YYYY-MM-DD เฉพาะมีใน Yahoo >= ${today} มิฉะนั้น null>",
+      "dps": "<ปันผลต่อหุ้น หรือ —>",
+      "dividendYield": "<จาก Yahoo หรือ —>",
+      "payDate": "<YYYY-MM-DD หรือ —>",
+      "lastPaidXdDate": "<จาก Yahoo หรือ —>",
+      "lastPaidDps": "<จาก Yahoo หรือ —>",
+      "noteTh": "<หมายเหตุสั้น 1 ประโยค>"
     }
   ],
   "socialInsights": [
     {
-      "rssIndex": <เลขดัชนี [0..41] จากรายการข่าว RSS ในข้อ 3 ถ้าตรง>,
       "platform": "<x | facebook | youtube>",
-      "channelName": "<ชื่อสำนักข่าว/เพจ/ช่อง YouTube/นักวิเคราะห์จาก RSS>",
-      "handleOrPage": "<ชื่อ Handle หรือแพลตฟอร์ม>",
-      "timeLabel": "<ล่าสุดวันนี้ / เมื่อวาน>",
-      "title": "<หัวข้อประเด็นร้อนภาษาไทยจากข่าว RSS จริง>",
-      "deepSummaryTh": "<บทสรุปเชิงลึก 2 ประโยคภาษาไทยจากข่าวจริง>",
-      "analystViewTh": "<มุมมองนักวิเคราะห์ 1 ประโยคว่าควรจับตาจุดใด>",
+      "channelName": "<ชื่อช่อง/แหล่งข่าวจากข้อ 3>",
+      "handleOrPage": "<Handle>",
+      "timeLabel": "ล่าสุดวันนี้",
+      "title": "<หัวข้อภาษาไทยกระชับ>",
+      "deepSummaryTh": "<สรุป 1-2 ประโยคสั้น>",
+      "analystViewTh": "<มุมมองสั้น 1 ประโยค>",
       "sentiment": "<bullish | bearish | watch>",
       "relatedAssets": ["<Ticker>"],
-      "countryFlag": "<อีโมจิธงชาติ>",
-      "sourceUrl": "<URL จริงจาก RSS ด้านบน>",
-      "searchQuery": "<คำค้นหาสั้นๆ>"
+      "countryFlag": "<ธงชาติ>",
+      "sourceUrl": "<URL จริงจากข้อ 3>"
     }
   ]
 }
 
-จำนวนรายการที่ต้องการ (ตอบกระชับ เป็น JSON ที่ถูกต้อง 100% ห้ามใส่คอมเมนต์ใน JSON):
-${
-  hasRealCalendar
-    ? '- calendarEnrichments: แปลไทยและวิเคราะห์ผลกระทบครบทุก id ในข้อ 2 (assetForecasts สูงสุด 2 ตัว/เหตุการณ์, aiImpacts สูงสุด 2 ตัว/เหตุการณ์)'
-    : `- calendarEvents: 6-8 เหตุการณ์เศรษฐกิจสำคัญระหว่าง ${yesterday} ถึง ${endDate} ที่มีปรากฏในข่าว RSS ข้อ 3 (ระบุเวลาไทย HH:mm น. UTC+7 ให้ตรงตามเวลาตลาดโลก เช่น 20:30 น. / 01:00 น.)`
-}
-- newsItems: 8-10 ข่าวเด่นจริงจากข้อ 3 (ระบุ rssIndex ที่ถูกต้องทุกข่าว, aiImpacts สูงสุด 2 ตัว/ข่าว)
-- earnings และ dividends: ครบทุกสินทรัพย์ในพอร์ตจริงของผู้ใช้ (ถ้าพอร์ตว่างให้ใส่ [])
-- socialInsights: 6 รายการ (x, facebook, youtube แพลตฟอร์มละ 2 รายการ อิงจากข่าวจริงพร้อมลิงก์จริง)`;
+จำนวนเป้าหมาย (กระชับ ไม่เยิ่นเย้อ):
+- calendarEnrichments: ครบ ${priorityCalendar.length} รายการในข้อ 2
+- newsItems: ครบ ${priorityRssIndices.length} ข่าวในข้อ 3
+- socialInsights: 6 รายการ (x, facebook, youtube อย่างละ 2)
+- earnings และ dividends: เฉพาะหุ้นในพอร์ตจริงของผู้ใช้`;
 }
 
 function buildSourcesFromRssAndYahoo(
@@ -934,12 +1254,13 @@ export function parseBatchedInvestCalResponse(
   today: string,
   realCalendarEvents: CalendarEvent[] = []
 ): BatchedSyncResponse {
-  const parsed = JSON.parse(extractJsonBlock(rawText || '{}')) as Record<string, unknown>;
+  // Resilient JSON recovery: never throws syntax errors on truncated/markdown-wrapped Gemini responses
+  const parsed = safeParseJsonObject(rawText || '{}');
   const nowMs = Date.now();
   const syncedAt = new Date(nowMs).toISOString();
   const sources = buildSourcesFromRssAndYahoo(rssHeadlines, yahooQuotes);
 
-  // 1. Merge Gemini Thai translations & portfolio impact analysis onto REAL ForexFactory UTC+7 events
+  // 1. Merge Gemini Thai translations, sector-grounded portfolioImpacts & macroImpacts onto REAL 54-country events
   const enrichmentById = new Map<string, Record<string, unknown>>();
   if (Array.isArray(parsed.calendarEnrichments)) {
     for (const rawEnr of parsed.calendarEnrichments) {
@@ -982,6 +1303,10 @@ export function parseBatchedInvestCalResponse(
         ? enr.actualOutcome
         : baseEv.actualOutcome;
 
+    const rawPortfolioImpacts = enr.portfolioImpacts ?? enr.aiImpacts;
+    const aiImpacts = sanitizeAiImpacts(rawPortfolioImpacts, portfolioEntries);
+    const macroImpacts = sanitizeMacroImpacts(enr.macroImpacts);
+
     return {
       ...baseEv,
       title: titleTh,
@@ -989,11 +1314,12 @@ export function parseBatchedInvestCalResponse(
       actualOutcome,
       relatedAssets,
       assetForecasts: sanitizeForecasts(enr.assetForecasts),
-      aiImpacts: sanitizeAiImpacts(enr.aiImpacts),
+      aiImpacts,
+      macroImpacts,
     };
   });
 
-  // 2. Parse optional extra calendar events (earnings/dividends or fallback if ForexFactory was unreachable)
+  // 2. Parse optional extra calendar events (earnings/dividends or fallback if external calendar feeds were unreachable)
   const extraAiCalendar: CalendarEvent[] = Array.isArray(parsed.calendarEvents)
     ? parsed.calendarEvents
         .map((rawEv, idx): CalendarEvent | null => {
@@ -1002,7 +1328,6 @@ export function parseBatchedInvestCalResponse(
           if (!validDate) return null;
           const category =
             ev.category === 'earnings' || ev.category === 'dividend' ? ev.category : 'economic';
-          // When real ForexFactory economic events are present, avoid duplicate AI-invented economic entries
           if (mergedRealCalendar.length > 0 && category === 'economic') {
             return null;
           }
@@ -1022,19 +1347,25 @@ export function parseBatchedInvestCalResponse(
             typeof ev.time === 'string' ? ev.time : '—'
           );
           const tsMs = parseBangkokEventTimestampMs(validDate, formattedTime);
+          const meta = resolveCountryCurrencyMeta(
+            typeof ev.countryCode === 'string' ? ev.countryCode : undefined,
+            typeof ev.currency === 'string' ? ev.currency : undefined
+          );
 
           return {
             id: `live-ev-${nowMs}-${idx}`,
             date: validDate,
             time: formattedTime,
             eventTimestampIso: tsMs ? new Date(tsMs).toISOString() : undefined,
-            countryCode:
-              typeof ev.countryCode === 'string' ? ev.countryCode.trim().toUpperCase() : 'US',
-            flag: typeof ev.flag === 'string' && ev.flag.trim() ? ev.flag.trim() : '🌐',
-            currency:
-              typeof ev.currency === 'string' ? ev.currency.trim().toUpperCase() : 'USD',
+            eventKind: 'indicator',
+            isAllDay: formattedTime === '—' || formattedTime === 'ตลอดวัน',
+            countryCode: meta.countryCode,
+            flag: typeof ev.flag === 'string' && ev.flag.trim() ? ev.flag.trim() : meta.flag,
+            currency: meta.currency,
             countryNameTh:
-              typeof ev.countryNameTh === 'string' ? ev.countryNameTh.trim() : 'ต่างประเทศ',
+              typeof ev.countryNameTh === 'string' && ev.countryNameTh.trim()
+                ? ev.countryNameTh.trim()
+                : meta.countryNameTh,
             impact: ev.impact === 3 || ev.impact === 2 || ev.impact === 1 ? ev.impact : 2,
             category,
             title: typeof ev.title === 'string' ? ev.title.trim() : '',
@@ -1052,7 +1383,8 @@ export function parseBatchedInvestCalResponse(
               : [],
             descriptionTh: typeof ev.descriptionTh === 'string' ? ev.descriptionTh.trim() : '',
             assetForecasts: sanitizeForecasts(ev.assetForecasts),
-            aiImpacts: sanitizeAiImpacts(ev.aiImpacts),
+            aiImpacts: sanitizeAiImpacts(ev.portfolioImpacts ?? ev.aiImpacts, portfolioEntries),
+            macroImpacts: sanitizeMacroImpacts(ev.macroImpacts),
             isLiveSynced: true,
           };
         })
@@ -1061,20 +1393,24 @@ export function parseBatchedInvestCalResponse(
 
   const calendarEvents: CalendarEvent[] = [...mergedRealCalendar, ...extraAiCalendar].sort(
     (a, b) => {
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      if (Boolean(a.isAllDay) !== Boolean(b.isAllDay)) return a.isAllDay ? -1 : 1;
       const aMs = a.eventTimestampIso ? Date.parse(a.eventTimestampIso) : 0;
       const bMs = b.eventTimestampIso ? Date.parse(b.eventTimestampIso) : 0;
       if (aMs && bMs && aMs !== bMs) return aMs - bMs;
-      return a.date === b.date ? a.time.localeCompare(b.time) : a.date.localeCompare(b.date);
+      return a.time.localeCompare(b.time);
     }
   );
 
-  // 3. Parse newsItems with REAL RSS pubDate converted to Asia/Bangkok (UTC+7) + relative time, sorted NEWEST FIRST
+  // 3. Parse AI-analyzed newsItems (<= 8 priority items) + append remaining multi-region RSS items
   const rssByUrl = new Map<string, PublicRssHeadline>();
   for (const r of rssHeadlines) {
     if (r.link) rssByUrl.set(r.link, r);
   }
+  const usedRssIndices = new Set<number>();
+  const usedNewsUrls = new Set<string>();
 
-  const newsItems: NewsItem[] = Array.isArray(parsed.newsItems)
+  const aiNewsItems: NewsItem[] = Array.isArray(parsed.newsItems)
     ? parsed.newsItems
         .map((rawItem, idx): NewsItem => {
           const item = (rawItem && typeof rawItem === 'object' ? rawItem : {}) as Record<
@@ -1092,18 +1428,41 @@ export function parseBatchedInvestCalResponse(
 
           const matchedRss =
             (rssIdx >= 0 ? rssHeadlines[rssIdx] : undefined) ||
-            (rawUrl ? rssByUrl.get(rawUrl) : undefined) ||
-            rssHeadlines[idx];
+            (rawUrl ? rssByUrl.get(rawUrl) : undefined);
+
+          if (rssIdx >= 0) usedRssIndices.add(rssIdx);
+          if (matchedRss?.link) usedNewsUrls.add(matchedRss.link);
 
           const safeUrl =
             rawUrl.startsWith('https://') || rawUrl.startsWith('http://')
               ? rawUrl
               : matchedRss?.link || undefined;
+          if (safeUrl) usedNewsUrls.add(safeUrl);
 
           const formattedTs = formatThaiNewsTimestamp(
             matchedRss?.pubDate || syncedAt,
             nowMs
           );
+
+          const countryCode =
+            matchedRss?.countryCode ||
+            (typeof item.countryCode === 'string' && item.countryCode.trim()
+              ? item.countryCode.trim().toUpperCase()
+              : 'GLOBAL');
+          const currency =
+            matchedRss?.currency ||
+            (typeof item.currency === 'string' && item.currency.trim()
+              ? item.currency.trim()
+              : countryCode === 'GLOBAL'
+              ? 'Global'
+              : resolveCountryCurrencyMeta(countryCode).currency);
+          const countryFlag =
+            matchedRss?.countryFlag ||
+            (typeof item.countryFlag === 'string' && item.countryFlag.trim()
+              ? item.countryFlag.trim()
+              : resolveCountryCurrencyMeta(countryCode, currency).flag);
+          const regionGroup =
+            matchedRss?.regionGroup || getRegionGroupForCode(countryCode, currency);
 
           return {
             id: `live-news-${nowMs}-${idx}`,
@@ -1114,7 +1473,10 @@ export function parseBatchedInvestCalResponse(
                 ? item.source.trim()
                 : matchedRss?.source || 'Google News RSS',
             sourceUrl: safeUrl,
-            headline: typeof item.headline === 'string' ? item.headline.trim() : '',
+            headline:
+              typeof item.headline === 'string' && item.headline.trim()
+                ? item.headline.trim()
+                : matchedRss?.title || '',
             impactSummary:
               typeof item.impactSummary === 'string' ? item.impactSummary.trim() : '',
             sentiment:
@@ -1127,21 +1489,66 @@ export function parseBatchedInvestCalResponse(
             macroTags: Array.isArray(item.macroTags)
               ? item.macroTags.filter((x): x is string => typeof x === 'string')
               : [],
-            countryCode:
-              typeof item.countryCode === 'string'
-                ? item.countryCode.trim().toUpperCase()
-                : 'GLOBAL',
-            countryFlag:
-              typeof item.countryFlag === 'string' && item.countryFlag.trim()
-                ? item.countryFlag.trim()
-                : '🌐',
-            aiImpacts: sanitizeAiImpacts(item.aiImpacts),
+            countryCode,
+            currency,
+            countryFlag,
+            regionGroup,
+            aiImpacts: sanitizeAiImpacts(
+              item.portfolioImpacts ?? item.aiImpacts,
+              portfolioEntries
+            ),
+            macroImpacts: sanitizeMacroImpacts(item.macroImpacts),
             isLiveSynced: true,
           };
         })
         .filter((n) => n.headline.length > 0)
-        .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))
     : [];
+
+  // Preserve remaining fresh multi-region RSS headlines so all 5 regions remain populated
+  const heldSymbols = portfolioEntries.map((p) => p.symbol);
+  const extraRssNews: NewsItem[] = [];
+  rssHeadlines.forEach((r, idx) => {
+    if (usedRssIndices.has(idx)) return;
+    if (r.link && usedNewsUrls.has(r.link)) return;
+    if (aiNewsItems.length + extraRssNews.length >= 25) return;
+
+    const matched = heldSymbols.filter((sym) =>
+      r.title.toUpperCase().includes(sym.toUpperCase())
+    );
+    const formattedTs = formatThaiNewsTimestamp(r.pubDate || syncedAt, nowMs);
+    extraRssNews.push({
+      id: `rss-extra-${nowMs}-${idx}`,
+      publishedAt: formattedTs.publishedAt,
+      timeLabel: formattedTs.timeLabel,
+      source: r.source,
+      sourceUrl: r.link || undefined,
+      headline: r.title,
+      impactSummary: `ข่าวจริงล่าสุดจาก ${r.source} (${r.countryFlag} ${r.currency}) — กดอ่านต้นฉบับเพื่อดูรายละเอียด`,
+      sentiment: 'neutral',
+      relatedAssets: matched,
+      macroTags:
+        r.regionGroup === 'TH'
+          ? ['thai_macro']
+          : r.channelHint === 'commodities'
+          ? ['precious_metals', 'oil_commodity']
+          : r.channelHint === 'crypto'
+          ? ['crypto']
+          : r.regionGroup === 'EUROPE'
+          ? ['eu_macro']
+          : r.regionGroup === 'ASIA'
+          ? ['china_macro', 'boj_jpy']
+          : ['us_rates'],
+      countryCode: r.countryCode,
+      currency: r.currency,
+      countryFlag: r.countryFlag,
+      regionGroup: r.regionGroup,
+      isLiveSynced: true,
+    });
+  });
+
+  const newsItems: NewsItem[] = [...aiNewsItems, ...extraRssNews].sort(
+    (a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt)
+  );
 
   let fearGreed: Partial<FearGreedData> | undefined;
   const rawFg = parsed.fearGreed as Record<string, unknown> | undefined;
@@ -1361,12 +1768,11 @@ export function buildPublicOnlyFallbackBatchedResponse(
   const heldSymbols = portfolioEntries.map((p) => p.symbol);
 
   const newsItems: NewsItem[] = rssHeadlines
-    .slice(0, 14)
+    .slice(0, 25)
     .map((r, idx) => {
       const matched = heldSymbols.filter((sym) =>
         r.title.toUpperCase().includes(sym.toUpperCase())
       );
-      const isThai = /[\u0E00-\u0E7F]/.test(r.title);
       const formattedTs = formatThaiNewsTimestamp(r.pubDate || syncedAt, nowMs);
       return {
         id: `rss-news-${nowMs}-${idx}`,
@@ -1375,12 +1781,25 @@ export function buildPublicOnlyFallbackBatchedResponse(
         source: r.source,
         sourceUrl: r.link || undefined,
         headline: r.title,
-        impactSummary: `ข่าวจริงล่าสุดจาก ${r.source} (กดลิงก์ต้นฉบับเพื่ออ่านรายละเอียดเพิ่มเติม)`,
+        impactSummary: `ข่าวจริงล่าสุดจาก ${r.source} (${r.countryFlag} ${r.currency}) — กดลิงก์ต้นฉบับเพื่ออ่านรายละเอียดเพิ่มเติม`,
         sentiment: 'neutral' as const,
         relatedAssets: matched,
-        macroTags: isThai ? ['thai_macro'] : ['us_rates'],
-        countryCode: isThai ? 'TH' : 'US',
-        countryFlag: isThai ? '🇹🇭' : '🇺🇸',
+        macroTags:
+          r.regionGroup === 'TH'
+            ? ['thai_macro']
+            : r.channelHint === 'commodities'
+            ? ['precious_metals', 'oil_commodity']
+            : r.channelHint === 'crypto'
+            ? ['crypto']
+            : r.regionGroup === 'EUROPE'
+            ? ['eu_macro']
+            : r.regionGroup === 'ASIA'
+            ? ['china_macro', 'boj_jpy']
+            : ['us_rates'],
+        countryCode: r.countryCode,
+        currency: r.currency,
+        countryFlag: r.countryFlag,
+        regionGroup: r.regionGroup,
         isLiveSynced: true,
       };
     })
@@ -1502,7 +1921,7 @@ export function parseChartTechnicalResponse(
   symbol: string,
   timeframe: ChartTimeframe
 ): ChartAiAnalysisResponse {
-  const parsed = JSON.parse(extractJsonBlock(rawText || '{}')) as Record<string, unknown>;
+  const parsed = safeParseJsonObject(rawText || '{}');
   const rawTrend = String(parsed.trend || '').trim();
   const trend: ChartTrendDirection =
     rawTrend === 'Uptrend' || rawTrend === 'Downtrend' || rawTrend === 'Sideway'
